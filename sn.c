@@ -659,8 +659,37 @@ static int process_mgmt( n2n_sn_t * sss,
             const char *version = (edge->version[0] != '\0') ? edge->version : "unknown";
             const char *os_name = (edge->os_name[0] != '\0') ? edge->os_name : "unknown";
 
+            /* MAC address validation */
+            uint8_t *mac = edge->mac_addr;
+            int is_valid_mac = 1;
+
+            /* Check for zero MAC */
+            if (mac[0] == 0 && mac[1] == 0 && mac[2] == 0 &&
+                mac[3] == 0 && mac[4] == 0 && mac[5] == 0) {
+                is_valid_mac = 0;
+            }
+
+            /* Check for broadcast MAC */
+            if (mac[0] == 0xFF && mac[1] == 0xFF && mac[2] == 0xFF &&
+                mac[3] == 0xFF && mac[4] == 0xFF && mac[5] == 0xFF) {
+                is_valid_mac = 0;
+            }
+
+            /* Check for locally administered MAC (00:01:00:xx:xx:xx pattern) */
+            if (mac[0] == 0x00 && mac[1] == 0x01 && mac[2] == 0x00) {
+                is_valid_mac = 0;
+            }
+
+            /* Skip invalid MAC addresses - don't display them at all */
+            if (!is_valid_mac) {
+                struct peer_info *temp = edge;
+                edge = edge->next;
+                free(temp);
+                continue;
+            }
+
             ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                              "  %2u  %-17s  %-48s  v%-8s  %s\n",
+                              "  %2u  %-17s  %-48s  %-8s  %s\n",
                               id++,
                               macaddr_str(mac_buf, edge->mac_addr),
                               sock_to_cstr(sock_buf, &edge->sock),

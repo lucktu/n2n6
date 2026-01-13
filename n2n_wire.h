@@ -151,7 +151,7 @@ struct n2n_REGISTER_SUPER
     n2n_cookie_t        cookie;         /* Link REGISTER_SUPER and REGISTER_SUPER_ACK */
     n2n_mac_t           edgeMac;        /* MAC to register with edge sending socket */
     n2n_auth_t          auth;           /* Authentication scheme and tokens */
-    char                version[16];    /* edge version string */
+    char                version[8];    /* edge version string */
     char                os_name[16];    /* operating system name */
     uint8_t             request_ip;     /* Request IP allocation flag */
     uint32_t            requested_ip;   /* Requested IP address */

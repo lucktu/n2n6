@@ -2,7 +2,7 @@ project(n2n C)
 cmake_minimum_required(VERSION 3.7)
 
 # N2n information
-set(N2N_VERSION 2.3.3.0)
+set(N2N_VERSION 2.3.4.0)
 set(N2N_OSNAME ${CMAKE_SYSTEM_NAME})
 
 add_definitions(-DN2N_VERSION=\"${N2N_VERSION}\" -DN2N_OSNAME=\"${N2N_OSNAME}\")

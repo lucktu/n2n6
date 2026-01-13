@@ -22,18 +22,11 @@
  */
 
 #include "n2n.h"
-
 #include "minilzo.h"
-
 #include <assert.h>
 
-#if defined(DEBUG)
-#   define PURGE_REGISTRATION_FREQUENCY   60
-#   define REGISTRATION_TIMEOUT          120
-#else /* #if defined(DEBUG) */
-#   define PURGE_REGISTRATION_FREQUENCY   60
-#   define REGISTRATION_TIMEOUT           (60*20)
-#endif /* #if defined(DEBUG) */
+#define PURGE_REGISTRATION_FREQUENCY   60
+#define REGISTRATION_TIMEOUT           150
 
 
 const uint8_t broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
