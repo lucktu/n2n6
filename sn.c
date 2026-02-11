@@ -584,9 +584,9 @@ static int process_mgmt( n2n_sn_t * sss,
 
     /* Send header */
     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                      "  id  mac                virt_ip          wan_ip                                           ver     os\n");
+                      "  id  mac                virt_ip          wan_ip                                           ver      os\n");
     ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
-                       "---n2n6--------------------------------------------------------------------------------------------n2n6---\n");
+                       "---n2n6---------------------------------------------------------------------------------------------n2n6---\n");
 
     r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
                sender_sock, sender_sock_len);
@@ -701,7 +701,7 @@ static int process_mgmt( n2n_sn_t * sss,
             a.s_addr = htonl(edge->assigned_ip);
             const char *ip_str = (edge->assigned_ip != 0) ? inet_ntoa(a) : "-";
             ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                              "  %2u  %-17s  %-15s  %-47s  %-6s  %s\n",
+                              "  %2u  %-17s  %-15s  %-47s  %-7s  %s\n",
                               id++,
                               macaddr_str(mac_buf, edge->mac_addr),
                               ip_str,
@@ -723,7 +723,7 @@ static int process_mgmt( n2n_sn_t * sss,
 
     /* Send footer and statistics */
     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                      "---n2n6--------------------------------------------------------------------------------------------n2n6---\n");
+                      "---n2n6---------------------------------------------------------------------------------------------n2n6---\n");
 
     time_t uptime = now - sss->start_time;
     int days = uptime / 86400;
@@ -1224,18 +1224,6 @@ int main( int argc, char * const argv[] )
         exit(1);
     }
 
-#if defined(N2N_HAVE_DAEMON)
-    if (sss.daemon)
-    {
-        useSyslog = true; /* traceEvent output now goes to syslog. */
-        if ( -1 == daemon( 0, 0 ) )
-        {
-            traceEvent( TRACE_ERROR, "Failed to become daemon." );
-            exit(-5);
-        }
-    }
-#endif /* #if defined(N2N_HAVE_DAEMON) */
-
     traceEvent( TRACE_DEBUG, "traceLevel is %d", traceLevel);
 
     int ipv4_available = 0, ipv6_available = 0;
@@ -1312,6 +1300,18 @@ int main( int argc, char * const argv[] )
         traceEvent( TRACE_NORMAL, "supernode is listening on UDP %u (management)", sss.mgmt_port );
 #endif // _WIN32
     traceEvent(TRACE_NORMAL, "supernode started");
+
+#if defined(N2N_HAVE_DAEMON)
+    if (sss.daemon)
+    {
+        useSyslog = true; /* traceEvent output now goes to syslog. */
+        if ( -1 == daemon( 0, 0 ) )
+        {
+            traceEvent( TRACE_ERROR, "Failed to become daemon." );
+            exit(-5);
+        }
+    }
+#endif /* #if defined(N2N_HAVE_DAEMON) */
 
     return run_loop(&sss);
 }
