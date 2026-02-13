@@ -1235,7 +1235,7 @@ static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
         eee->sup_attempts = N2N_EDGE_SUP_ATTEMPTS;
     }
 
-    if(eee->re_resolve_supernode_ip || (eee->sn_num > 1) )
+    if(eee->re_resolve_supernode_ip)
     {
         supernode2addr(&(eee->supernode), eee->sn_af, eee->sn_ip_array[eee->sn_idx] );
     }
