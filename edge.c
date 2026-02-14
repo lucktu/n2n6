@@ -934,6 +934,7 @@ void check_peer( n2n_edge_t * eee,
         scan = (struct peer_info*) calloc( 1, sizeof( struct peer_info ) );
         memcpy(scan->mac_addr, mac, N2N_MAC_SIZE);
         scan->sock = *peer;
+        scan->assigned_ip = 0;
         strncpy(scan->version, version ? version : "unknown", sizeof(scan->version) - 1);
         strncpy(scan->os_name, os_name ? os_name : "unknown", sizeof(scan->os_name) - 1);
         peer_list_add( &(eee->known_peers), scan );
@@ -1678,35 +1679,10 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
                                 "Help for edge management console:\n"
                                 "  stop    Gracefully exit edge\n"
                                 "  help    This help message\n"
-                                "  list    List peers\n"
                                 "  +verb   Increase verbosity of logging\n"
                                 "  -verb   Decrease verbosity of logging\n"
                                 "  reload  Re-read the keyschedule\n"
                                 "  <enter> Display statistics\n\n");
-            sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
-                   (struct sockaddr*) &sender_sock, i);
-            return;
-        }
-
-        if (0 == memcmp(udp_buf, "list", 4)) {
-            msg_len = 0;
-            macstr_t mac;
-            n2n_sock_str_t sockaddr;
-            struct peer_info* peer = eee->pending_peers;
-            while(peer) {
-                sock_to_cstr(sockaddr, &peer->sock);
-                msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                    "%s %s\n", macaddr_str(mac, peer->mac_addr), sockaddr);
-                peer = peer->next;
-            }
-            msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len), "-\n");
-            peer = eee->known_peers;
-            while(peer) {
-                sock_to_cstr(sockaddr, &peer->sock);
-                msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                    "%s %s\n", macaddr_str(mac, peer->mac_addr), sockaddr);
-                peer = peer->next;
-            }
             sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
                    (struct sockaddr*) &sender_sock, i);
             return;
@@ -1767,9 +1743,9 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
 
     /* Send header */
     msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                       " id  mac                wan_ip                                            ver      os\n");
+                       " id  mac                virt_ip          wan_ip                                            ver      os\n");
     msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
-                        "---n2n6-----------------------------------------------------------------------------------\n");
+                        "---n2n6----------------------------------------------------------------------------------------------------\n");
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
 
@@ -1783,14 +1759,28 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     struct peer_info* peer = eee->pending_peers;
     int id = 1;
     while(peer) {
+        /* Skip if same virtual IP as local edge */
+        if (peer->assigned_ip == ntohl(eee->device.ip_addr)) {
+            peer = peer->next;
+            continue;
+        }
         sock_to_cstr(sockaddr, &peer->sock);
         const char *version = (peer->version[0] != '\0') ? peer->version : "unknown";
         const char *os_name = (peer->os_name[0] != '\0') ? peer->os_name : "unknown";
 
+        /* Format virtual IP */
+        char virt_ip[16] = "-";
+        if (peer->assigned_ip != 0) {
+            struct in_addr addr;
+            addr.s_addr = htonl(peer->assigned_ip);
+            inet_ntop(AF_INET, &addr, virt_ip, sizeof(virt_ip));
+        }
+
         msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                           " %2u  %-17s  %-48s  %-7s  %s\n",
+                           " %2u  %-17s  %-15s  %-48s  %-7s  %s\n",
                            id++,
                            macaddr_str(mac, peer->mac_addr),
+                           virt_ip,
                            sock_to_cstr(sockaddr, &peer->sock),
                            version,
                            os_name);
@@ -1807,14 +1797,28 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     peer = eee->known_peers;
     id = 1;
     while(peer) {
+        /* Skip if same virtual IP as local edge */
+        if (peer->assigned_ip == ntohl(eee->device.ip_addr)) {
+            peer = peer->next;
+            continue;
+        }
         sock_to_cstr(sockaddr, &peer->sock);
         const char *version = (peer->version[0] != '\0') ? peer->version : "unknown";
         const char *os_name = (peer->os_name[0] != '\0') ? peer->os_name : "unknown";
 
+        /* Format virtual IP */
+        char virt_ip[16] = "-";
+        if (peer->assigned_ip != 0) {
+            struct in_addr addr;
+            addr.s_addr = htonl(peer->assigned_ip);
+            inet_ntop(AF_INET, &addr, virt_ip, sizeof(virt_ip));
+        }
+
         msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                           " %2u  %-17s  %-48s  %-7s  %s\n",
+                           " %2u  %-17s  %-15s  %-48s  %-7s  %s\n",
                            id++,
                            macaddr_str(mac, peer->mac_addr),
+                           virt_ip,
                            sock_to_cstr(sockaddr, &peer->sock),
                            version,
                            os_name);
@@ -1851,7 +1855,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
 
     /* Send statistics */
     msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                       "-----------------------------------------------------------------------------------n2n6---\n");
+                       "----------------------------------------------------------------------------------------------------n2n6---\n");
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
 
@@ -2084,12 +2088,12 @@ static void readFromIPSocket( n2n_edge_t * eee )
 						 if (ra.peer_count > 0) {
 							 traceEvent(TRACE_NORMAL, "Community members (%u):", ra.peer_count);
 							 for (int i = 0; i < ra.peer_count && i < 16; i++) {
-									macstr_t mac_buf;
+								 macstr_t mac_buf;
 								 uint32_t peer_ip = ntohl(ra.peer_ips[i]);
 								 char peer_ip_str[16];
-								  n2n_sock_str_t pub_ip_str;
+								 n2n_sock_str_t pub_ip_str;
 
-								  snprintf(peer_ip_str, sizeof(peer_ip_str), "10.64.0.%u", peer_ip & 0xFF);
+								 snprintf(peer_ip_str, sizeof(peer_ip_str), "10.64.0.%u", peer_ip & 0xFF);
 
 								 traceEvent(TRACE_NORMAL, "  Private IP: %s, Public IP: %s",
 											   peer_ip_str,
@@ -2137,6 +2141,46 @@ static void readFromIPSocket( n2n_edge_t * eee )
                     /* Store supernode IP support capabilities */
                     eee->sn_ipv4_support = ra.sn_ipv4_support;
                     eee->sn_ipv6_support = ra.sn_ipv6_support;
+
+                    /* Update existing P2P peers in known_peers */
+                    for (int i = 0; i < ra.peer_count && i < 16; i++) {
+                        struct peer_info *peer = find_peer_by_mac(eee->known_peers, ra.peer_macs[i]);
+
+                        if (peer) {
+                            /* Update known peer info */
+                            peer->assigned_ip = ntohl(ra.peer_ips[i]);
+                            peer->last_seen = time(NULL);
+                            if (strlen(peer->version) == 0) {
+                                strncpy(peer->version, ra.peer_versions[i], sizeof(peer->version) - 1);
+                                peer->version[sizeof(peer->version) - 1] = '\0';
+                            }
+                        }
+                    }
+
+                    /* Clear only pending_peers, not known_peers */
+                    clear_peer_list(&(eee->pending_peers));
+
+                    /* Add new peers to pending_peers */
+                    for (int i = 0; i < ra.peer_count && i < 16; i++) {
+                        /* Skip if already in known_peers */
+                        if (find_peer_by_mac(eee->known_peers, ra.peer_macs[i])) {
+                            continue;
+                        }
+
+                        /* Create new peer and add to pending_peers */
+                        struct peer_info *peer = (struct peer_info*) calloc(1, sizeof(struct peer_info));
+                        memcpy(peer->mac_addr, ra.peer_macs[i], N2N_MAC_SIZE);
+                        peer->sock = ra.peer_pub_ips[i];
+                        peer->assigned_ip = ntohl(ra.peer_ips[i]);
+                        peer->last_seen = time(NULL);
+                        strncpy(peer->version, ra.peer_versions[i], sizeof(peer->version) - 1);
+                        peer->version[sizeof(peer->version) - 1] = '\0';
+                        strncpy(peer->os_name, ra.peer_os_names[i], sizeof(peer->os_name) - 1);
+                        peer->os_name[sizeof(peer->os_name) - 1] = '\0';
+                        memcpy(peer->community_name, eee->community_name, N2N_COMMUNITY_SIZE);
+
+                        peer_list_add(&(eee->pending_peers), peer);
+                    }
                 }
                 else
                 {

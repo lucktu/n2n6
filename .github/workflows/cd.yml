@@ -147,11 +147,11 @@ jobs:
         with:
           arch: ${{ matrix.MSVC_ARCH }}
 
-      - name: Install Perl
+      - name: Install Perl via Chocolatey
         if: runner.os == 'windows'
-        uses: shogo82148/actions-setup-perl@v1
-        with:
-          perl-version: '5.38'
+        run: |
+          choco install strawberryperl -y
+          echo "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install NASM
         if: runner.os == 'windows'
@@ -231,9 +231,9 @@ jobs:
         if: runner.os == 'Linux'
         uses: lmq8267/dl-musl@main
         with:
-         target: ${{ matrix.URL }}
-         static: true
-         gccpath: /opt/musl_gcc
+          target: ${{ matrix.URL }}
+          static: true
+          gccpath: /opt/musl_gcc
 
       - name: Build Windows OpenSSL
         if: steps.cache-openssl.outputs.cache-hit != 'true' && runner.os == 'windows' && endsWith(matrix.TARGET, '_AES')
@@ -345,6 +345,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@master
         if: always()
+        continue-on-error: true
         with:
          name: N2N_ipv6-${{ env.TARGET }}
          path: |

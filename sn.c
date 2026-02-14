@@ -89,6 +89,10 @@ static void collect_community_peers(n2n_sn_t * sss,
             memcpy(ack->peer_macs[count], scan->mac_addr, N2N_MAC_SIZE);
             ack->peer_ips[count] = htonl(scan->assigned_ip);
             ack->peer_pub_ips[count] = scan->sock;
+            strncpy(ack->peer_versions[count], scan->version, 7);
+            ack->peer_versions[count][7] = '\0';
+            strncpy(ack->peer_os_names[count], scan->os_name, 15);
+            ack->peer_os_names[count][15] = '\0';
             count++;
         }
         scan = scan->next;

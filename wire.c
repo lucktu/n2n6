@@ -410,6 +410,8 @@ size_t encode_REGISTER_SUPER_ACK( uint8_t * base,
         retval += encode_mac( base, idx, reg->peer_macs[i] );
         retval += encode_uint32( base, idx, reg->peer_ips[i] );
         retval += encode_sock( base, idx, &reg->peer_pub_ips[i] );
+        retval += encode_buf( base, idx, reg->peer_versions[i], 8 );
+        retval += encode_buf( base, idx, reg->peer_os_names[i], 16 );
     }
 
     return retval;
@@ -448,6 +450,8 @@ size_t decode_REGISTER_SUPER_ACK( n2n_REGISTER_SUPER_ACK_t * reg,
         retval += decode_mac( reg->peer_macs[i], base, rem, idx );
         retval += decode_uint32( &(reg->peer_ips[i]), base, rem, idx );
         retval += decode_sock( &(reg->peer_pub_ips[i]), base, rem, idx );
+        retval += decode_buf( reg->peer_versions[i], 8, base, rem, idx );
+        retval += decode_buf( reg->peer_os_names[i], 16, base, rem, idx );
     }
 
     return retval;

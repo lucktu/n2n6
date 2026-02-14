@@ -185,6 +185,8 @@ struct n2n_REGISTER_SUPER_ACK
     n2n_mac_t           peer_macs[16];    /* List of MAC addresses of group members */
     uint32_t            peer_ips[16];     /* List of IP addresses of group members */
     n2n_sock_t          peer_pub_ips[16]; /* List of public IP addresses of group members */
+    char                peer_versions[16][8];    /* Version strings */
+    char                peer_os_names[16][16];   /* OS name strings */
 };
 
 typedef struct n2n_REGISTER_SUPER_ACK n2n_REGISTER_SUPER_ACK_t;
