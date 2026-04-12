@@ -236,6 +236,7 @@ struct peer_info {
     uint8_t             keepalive_fails;   /* consecutive keepalive failures */
     time_t              last_query_sent;   /* time last query_peer was sent, for rate-limiting */
     time_t              last_punch_probe;  /* time last PROBE was sent during hole-punch */
+    uint8_t             punch_retry_count; /* number of punch retries, remove after max */
 };
 
 struct n2n_edge; /* defined in edge.c */

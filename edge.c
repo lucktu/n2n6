@@ -1041,6 +1041,7 @@ static void start_punch( n2n_edge_t * eee, struct peer_info * peer )
 static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
 {
     struct peer_info * scan = eee->pending_peers;
+    struct peer_info * prev = NULL;
     while ( scan ) {
         /* LAN punch: if no ACK within 15 seconds, fall back to WAN punch */
         if ( scan->num_sockets == 2 && !scan->lan_punch_done &&
@@ -1076,14 +1077,28 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
         } else if ( scan->punch_failed &&
                     (now - scan->punch_reset_time) > 300 )
         {
+            scan->punch_retry_count++;
+            if ( scan->punch_retry_count > 3 ) {
+                traceEvent(TRACE_NORMAL, "Giving up on %s after %u punch retries, removing",
+                           macaddr_str((char[N2N_MACSTR_SIZE]){0}, scan->mac_addr),
+                           scan->punch_retry_count);
+                struct peer_info *tmp = scan;
+                if ( prev ) prev->next = scan->next;
+                else eee->pending_peers = scan->next;
+                scan = scan->next;
+                free(tmp);
+                continue;
+            }
             scan->punch_failed = 0;
             scan->punch_start_time = 0;
             scan->lan_punch_done = 0;
             scan->lan_punch_start = 0;
-            traceEvent(TRACE_INFO, "Retrying P2P punch for %s",
-                       macaddr_str((char[N2N_MACSTR_SIZE]){0}, scan->mac_addr));
+            traceEvent(TRACE_INFO, "Retrying P2P punch for %s (attempt %u/3)",
+                       macaddr_str((char[N2N_MACSTR_SIZE]){0}, scan->mac_addr),
+                       scan->punch_retry_count);
             start_punch(eee, scan);
         }
+        prev = scan;
         scan = scan->next;
     }
 }
