@@ -1104,17 +1104,25 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                            scan->keepalive_fails, KEEPALIVE_MAX_FAILS);
 
                 if ( scan->keepalive_fails >= KEEPALIVE_MAX_FAILS ) {
-                    traceEvent(TRACE_NORMAL, "Keepalive: removing peer %s after %u failures",
-                               macaddr_str(mac_tmp, scan->mac_addr),
-                               scan->keepalive_fails);
-                    n2n_mac_t lost_mac;
-                    memcpy(lost_mac, scan->mac_addr, N2N_MAC_SIZE);
+                    traceEvent(TRACE_NORMAL, "Keepalive: peer %s unreachable, moving to pending for re-punch",
+                               macaddr_str(mac_tmp, scan->mac_addr));
+                    /* Remove from known_peers */
                     if ( prev ) prev->next = next;
                     else eee->known_peers = next;
-                    free(scan);
+                    /* Move to pending_peers and re-punch instead of freeing,
+                     * so supernode PEER_INFO can trigger reconnect even if
+                     * the peer's address hasn't changed. */
+                    scan->next             = eee->pending_peers;
+                    eee->pending_peers     = scan;
+                    scan->punch_start_time = 0;
+                    scan->punch_failed     = 0;
+                    scan->keepalive_fails  = 0;
+                    scan->last_probe_sent  = 0;
+                    scan->lan_punch_start  = 0;
+                    scan->lan_punch_done   = 0;
+                    send_query_peer(eee, scan->mac_addr);
+                    start_punch(eee, scan);
                     scan = next;
-                    /* Query supernode immediately to trigger reconnect */
-                    send_query_peer(eee, lost_mac);
                     continue;
                 }
             }
