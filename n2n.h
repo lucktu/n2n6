@@ -243,6 +243,7 @@ struct peer_info {
     time_t              lan_punch_start;   /* when LAN punch started */
     uint8_t             lan_punch_done;    /* 1 = LAN punch done (success or timeout) */
     time_t              last_p2p;          /* last time direct P2P data was received */
+    uint8_t             punch_confirmed;   /* 1 = direct connection confirmed by P2P packet */
 };
 
 struct n2n_edge; /* defined in edge.c */
