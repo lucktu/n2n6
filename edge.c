@@ -1405,7 +1405,7 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
             if ( scan->last_seen >= scan->last_probe_sent ) {
                 scan->last_probe_sent = 0;
                 scan->keepalive_fails = 0;
-            } else if ( (now - scan->last_probe_sent) >= (KEEPALIVE_TIMEOUT_SECONDS - KEEPALIVE_IDLE_SECONDS) ) {
+            } else if ( (now - scan->last_probe_sent) >= KEEPALIVE_TIMEOUT_SECONDS ) {
                 scan->keepalive_fails++;
                 scan->last_probe_sent = 0;
 
@@ -1774,16 +1774,6 @@ static void update_peer_address(n2n_edge_t * eee,
  */
 static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
 {
-    if ( nowTime > (time_t) (eee->last_register_req + 30) )
-    {
-        eee->sn_wait = 0;
-        eee->sup_attempts = N2N_EDGE_SUP_ATTEMPTS;
-        send_register_super( eee, &(eee->supernode) );
-        eee->sn_wait = 1;
-        eee->last_register_req = nowTime;
-        return;
-    }
-
     if ( eee->sn_wait && ( nowTime > (time_t) (eee->last_register_req + (eee->register_lifetime/10) ) ) )
     {
         /* fall through - fast retry */

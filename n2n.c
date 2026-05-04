@@ -27,6 +27,7 @@
 
 #define PURGE_REGISTRATION_FREQUENCY   60
 #define REGISTRATION_TIMEOUT           150
+#define DEREGISTER_GRACE_PERIOD        60
 
 
 const uint8_t broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -390,6 +391,24 @@ size_t purge_expired_registrations( struct peer_info ** peer_list ) {
     traceEvent(TRACE_DEBUG, "Purging old registrations");
 
     num_reg = purge_peer_list( peer_list, now-REGISTRATION_TIMEOUT );
+
+    {
+        struct peer_info *scan = *peer_list;
+        struct peer_info *prev = NULL;
+        while (scan) {
+            if (scan->deregister_time > 0 && (now - scan->deregister_time) > DEREGISTER_GRACE_PERIOD) {
+                struct peer_info *next = scan->next;
+                if (prev) prev->next = next;
+                else *peer_list = next;
+                free(scan);
+                scan = next;
+                ++num_reg;
+            } else {
+                prev = scan;
+                scan = scan->next;
+            }
+        }
+    }
 
     last_purge = now;
     traceEvent(TRACE_DEBUG, "Remove %ld registrations", num_reg);

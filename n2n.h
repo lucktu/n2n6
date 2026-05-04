@@ -247,6 +247,7 @@ struct peer_info {
     uint8_t             punch_retry_count; /* number of full-cycle retries */
     uint8_t             first_seen;        /* 1 = first real packet logged (P2P or relay) */
     uint8_t             last_was_relay;    /* 1 = last packet was via relay (for state change detection) */
+    time_t              deregister_time;   /* 0 = active; >0 = deregistered, pending grace-period removal */
 };
 
 struct n2n_edge; /* defined in edge.c */

@@ -891,6 +891,7 @@ static int try_forward( n2n_sn_t * sss,
     if ( NULL != scan )
     {
         ssize_t data_sent_len;
+        scan->last_seen = now;
         data_sent_len = sendto_sock( sss, &(scan->sock), pktbuf, pktsize );
 
         if ( data_sent_len == pktsize )
@@ -1222,6 +1223,7 @@ static int try_broadcast( n2n_sn_t * sss,
         {
             ssize_t data_sent_len;
 
+            scan->last_seen = now;
             data_sent_len = sendto_sock(sss, &(scan->sock), pktbuf, pktsize);
 
             if(data_sent_len != pktsize)
@@ -1646,7 +1648,9 @@ static int process_udp( n2n_sn_t * sss,
                     macaddr_str( mac_buf, reg.edgeMac ),
                     sock_to_cstr( sockbuf, &(ack.sock) ) );
 
-        /* Push all existing peers only when this is a NEW edge registration */
+        /* Push all existing peers to the new edge only.
+         * Do NOT push the new edge to existing peers - they discover
+         * it on demand via QUERY_PEER / REGISTER when needed. */
         if ( is_new_edge )
         {
             n2n_common_t    pi_cmn;
@@ -1654,23 +1658,6 @@ static int process_udp( n2n_sn_t * sss,
             uint8_t         pibuf[N2N_SN_PKTBUF_SIZE];
             size_t          pix;
             struct peer_info *p = sss->edges;
-
-            n2n_common_t    a_cmn;
-            n2n_PEER_INFO_t a_pi;
-            uint8_t         a_pibuf[N2N_SN_PKTBUF_SIZE];
-            size_t          a_pix;
-
-            memset(&a_cmn, 0, sizeof(a_cmn));
-            a_cmn.ttl   = N2N_DEFAULT_TTL;
-            a_cmn.pc    = n2n_peer_info;
-            a_cmn.flags = N2N_FLAGS_FROM_SUPERNODE;
-            memcpy(a_cmn.community, cmn.community, sizeof(n2n_community_t));
-
-            memcpy(a_pi.mac, reg.edgeMac, N2N_MAC_SIZE);
-            a_pi.sockets[0] = ack.sock;
-            a_pi.aflags = 0;
-            a_pix = 0;
-            encode_PEER_INFO(a_pibuf, &a_pix, &a_cmn, &a_pi);
 
             memset(&pi_cmn, 0, sizeof(pi_cmn));
             pi_cmn.ttl   = N2N_DEFAULT_TTL;
@@ -1691,14 +1678,12 @@ static int process_udp( n2n_sn_t * sss,
                     } else {
                         pi.aflags = 0;
                     }
-                    /* Include IPv6 address if available */
                     if (p->sock6.family == AF_INET6) {
                         pi.aflags |= N2N_AFLAGS_IPV6_SOCKET;
                         pi.sock6 = p->sock6;
                     } else {
                         memset(&pi.sock6, 0, sizeof(n2n_sock_t));
                     }
-                    /* Include version and os_name so edge can display them */
                     strncpy(pi.version, p->version, sizeof(pi.version) - 1);
                     strncpy(pi.os_name, p->os_name, sizeof(pi.os_name) - 1);
                     pix = 0;
@@ -1708,34 +1693,6 @@ static int process_udp( n2n_sn_t * sss,
                     traceEvent(TRACE_DEBUG, "pushed PEER_INFO %s to new edge %s",
                                macaddr_str(mac_buf, p->mac_addr),
                                macaddr_str(mac_buf2, reg.edgeMac));
-
-                    {
-                        struct sockaddr_storage peer_sa;
-                        socklen_t peer_sa_len;
-                        SOCKET peer_sock;
-
-                        if (p->sock.family == AF_INET6) {
-                            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&peer_sa;
-                            memset(sa6, 0, sizeof(*sa6));
-                            sa6->sin6_family = AF_INET6;
-                            sa6->sin6_port   = htons(p->sock.port);
-                            memcpy(&sa6->sin6_addr, p->sock.addr.v6, IPV6_SIZE);
-                            peer_sa_len = sizeof(struct sockaddr_in6);
-                            peer_sock   = sss->sock6;
-                        } else {
-                            struct sockaddr_in *sa4 = (struct sockaddr_in *)&peer_sa;
-                            memset(sa4, 0, sizeof(*sa4));
-                            sa4->sin_family = AF_INET;
-                            sa4->sin_port   = htons(p->sock.port);
-                            memcpy(&sa4->sin_addr, p->sock.addr.v4, IPV4_SIZE);
-                            peer_sa_len = sizeof(struct sockaddr_in);
-                            peer_sock   = sss->sock;
-                        }
-                        sendto(peer_sock, a_pibuf, a_pix, 0,
-                               (struct sockaddr *)&peer_sa, peer_sa_len);
-                        traceEvent(TRACE_DEBUG, "pushed A's new addr to peer %s (simultaneous open)",
-                                   macaddr_str(mac_buf, p->mac_addr));
-                    }
                 }
                 p = p->next;
             }
