@@ -1297,7 +1297,7 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
 }
 
 #define KEEPALIVE_IDLE_SECONDS   20   /* send probe after this many seconds of silence */
-#define KEEPALIVE_TIMEOUT_SECONDS 25  /* remove peer if no reply within this many seconds after probe */
+#define KEEPALIVE_TIMEOUT_SECONDS 5   /* remove peer if no reply within this many seconds after probe */
 #define KEEPALIVE_MAX_FAILS       3   /* remove peer after this many consecutive failures */
 
 static void update_peer_address(n2n_edge_t * eee,
@@ -1349,26 +1349,28 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
     struct peer_info *prev = NULL;
     MACSTR_TMP(mac_tmp);
 
+    time_t threshold = now - eee->register_lifetime;
+    int active_comm = (eee->last_p2p > threshold) ||
+                      (eee->last_sup > threshold);
+
+    if (active_comm)
+        return;
+
     while ( scan ) {
         struct peer_info *next = scan->next;
         time_t idle = now - scan->last_seen;
 
-        /* Skip keepalive for peers using relay (punch_failed=1).
-         * They communicate via supernode, so we don't send direct PROBEs.
-         * Their liveness is tracked through supernode relay activity. */
         if ( scan->punch_failed ) {
             prev = scan;
             scan = next;
             continue;
         }
 
-        /* Skip keepalive for IPv4-only peers if we have no IPv4 socket (shouldn't happen) */
         if ( scan->sock.family == AF_INET && eee->udp_sock == -1 ) {
             prev = scan;
             scan = next;
             continue;
         }
-        /* Skip keepalive for IPv6-only peers if we have no IPv6 socket */
         if ( scan->sock.family == AF_INET6 && eee->udp_sock6 == -1 ) {
             prev = scan;
             scan = next;
@@ -1376,7 +1378,6 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
         }
 
         if ( scan->last_probe_sent == 0 ) {
-            /* No probe sent yet: send one if idle too long */
             if ( idle >= KEEPALIVE_IDLE_SECONDS ) {
                 n2n_common_t cmn;
                 n2n_PROBE_t probe;
@@ -1392,7 +1393,6 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                 memcpy(probe.dstMac, scan->mac_addr, N2N_MAC_SIZE);
 
                 encode_PROBE(pktbuf, &idx, &cmn, &probe);
-                /* Send keepalive to the active direct address */
                 const n2n_sock_t *ka_sock = (scan->sock6.family == AF_INET6 && eee->udp_sock6 != -1)
                                             ? &scan->sock6 : &scan->sock;
                 sendto_sock(sock_for_dest(eee, ka_sock), pktbuf, idx, ka_sock);
@@ -1402,13 +1402,10 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                            macaddr_str(mac_tmp, scan->mac_addr), (long)idle);
             }
         } else {
-            /* Probe already sent: check if reply came back */
             if ( scan->last_seen >= scan->last_probe_sent ) {
-                /* Got a reply: reset */
                 scan->last_probe_sent = 0;
                 scan->keepalive_fails = 0;
             } else if ( (now - scan->last_probe_sent) >= (KEEPALIVE_TIMEOUT_SECONDS - KEEPALIVE_IDLE_SECONDS) ) {
-                /* No reply within timeout */
                 scan->keepalive_fails++;
                 scan->last_probe_sent = 0;
 
@@ -1419,12 +1416,8 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                 if ( scan->keepalive_fails >= KEEPALIVE_MAX_FAILS ) {
                     traceEvent(TRACE_INFO, "Keepalive: peer %s unreachable, moving to pending for re-punch",
                                PEER_ID(mac_tmp, scan));
-                    /* Remove from known_peers */
                     if ( prev ) prev->next = next;
                     else eee->known_peers = next;
-                    /* Move to pending_peers and re-punch instead of freeing,
-                     * so supernode PEER_INFO can trigger reconnect even if
-                     * the peer's address hasn't changed. */
                     scan->next             = eee->pending_peers;
                     eee->pending_peers     = scan;
                     scan->punch_start_time = 0;
@@ -1815,12 +1808,19 @@ static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
 
     if(eee->re_resolve_supernode_ip)
     {
-        supernode2addr(&(eee->supernode), eee->sn_af, eee->sn_ip_array[eee->sn_idx]);
-        memset(&eee->supernode_alt, 0, sizeof(n2n_sock_t));
+        time_t threshold = nowTime - eee->register_lifetime;
+        int active_comm = (eee->last_p2p > threshold) ||
+                          (eee->last_sup > threshold);
+
+        if (!active_comm)
         {
-            int alt_af = (eee->supernode.family == AF_INET6) ? AF_INET : AF_INET6;
-            if (supernode2addr(&eee->supernode_alt, alt_af, eee->sn_ip_array[eee->sn_idx]) != 0)
-                memset(&eee->supernode_alt, 0, sizeof(n2n_sock_t));
+            supernode2addr(&(eee->supernode), eee->sn_af, eee->sn_ip_array[eee->sn_idx]);
+            memset(&eee->supernode_alt, 0, sizeof(n2n_sock_t));
+            {
+                int alt_af = (eee->supernode.family == AF_INET6) ? AF_INET : AF_INET6;
+                if (supernode2addr(&eee->supernode_alt, alt_af, eee->sn_ip_array[eee->sn_idx]) != 0)
+                    memset(&eee->supernode_alt, 0, sizeof(n2n_sock_t));
+            }
         }
     }
 
