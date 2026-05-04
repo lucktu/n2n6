@@ -702,12 +702,14 @@ static int update_edge( n2n_sn_t * sss,
 
         memcpy(scan->community_name, community, sizeof(n2n_community_t) );
         memcpy(&(scan->mac_addr), edgeMac, sizeof(n2n_mac_t));
-        memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
-        /* Also record in the appropriate typed slot */
-        if (sender_sock->family == AF_INET6)
+        /* Store address in the correct slot based on family */
+        if (sender_sock->family == AF_INET6) {
+            memset(&(scan->sock), 0, sizeof(n2n_sock_t));  /* No IPv4 yet */
             memcpy(&(scan->sock6), sender_sock, sizeof(n2n_sock_t));
-        else
-            memset(&(scan->sock6), 0, sizeof(n2n_sock_t));
+        } else {
+            memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
+            memset(&(scan->sock6), 0, sizeof(n2n_sock_t));  /* No IPv6 yet */
+        }
 
         if (version) {
             strncpy(scan->version, version, sizeof(scan->version) - 1);
@@ -726,17 +728,27 @@ static int update_edge( n2n_sn_t * sss,
         scan->next = sss->edges;
         sss->edges = scan;
 
-        scan->sock     = *sender_sock;  /* IPv4 public (or IPv6 if that's what came in) */
+        if (sender_sock->family == AF_INET6)
+            scan->sock6    = *sender_sock;
+        else
+            scan->sock     = *sender_sock;
         if (local_sock_ena && local_sock)
             scan->sock_lan = *local_sock;
 
         {
             struct in_addr vip_addr;
             vip_addr.s_addr = htonl(scan->assigned_ip);
+            char addr_buf[64];
+            if (scan->sock.family == AF_INET)
+                sock_to_cstr(addr_buf, &scan->sock);
+            else if (scan->sock6.family == AF_INET6)
+                sock_to_cstr(addr_buf, &scan->sock6);
+            else
+                strcpy(addr_buf, "-");
             traceEvent( TRACE_NORMAL, "update_edge created   %s vip=%s ==> %s%s",
                         macaddr_str( mac_buf, edgeMac ),
                         inet_ntoa(vip_addr),
-                        sock_to_cstr( sockbuf, &scan->sock ),
+                        addr_buf,
                         (scan->sock_lan.family != 0) ? " (LAN)" : "" );
         }
 
