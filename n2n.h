@@ -239,7 +239,11 @@ struct peer_info {
     time_t              last_query_sent;   /* time last query_peer was sent, for rate-limiting */
     time_t              last_punch_probe;  /* time last PROBE was sent during hole-punch */
     uint8_t             punch_retry_count; /* number of punch retries, remove after max */
+    uint8_t             register_retry_count; /* REGISTER retries after PROBE_ACK, max 3 */
+    time_t              last_register_sent;   /* time last REGISTER was sent after PROBE_ACK */
     uint8_t             first_seen;        /* 1 = first real packet logged (P2P or relay) */
+    n2n_sock_t          temp_local_sock;   /* dynamically selected best local IP for this peer */
+    uint8_t             temp_local_sock_valid; /* 1 if temp_local_sock is valid */
 };
 
 struct n2n_edge; /* defined in edge.c */

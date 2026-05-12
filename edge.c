@@ -59,7 +59,7 @@
 #define REGISTER_SUPER_INTERVAL_MAX     120  /* sec */
 #define IFACE_UPDATE_INTERVAL           (30) /* sec. How long it usually takes to get an IP lease. */
 #define TRANSOP_TICK_INTERVAL           (10) /* sec */
-#define PUNCH_TIMEOUT                   60   /* sec: give up hole-punch after this */
+#define PUNCH_TIMEOUT                   7    /* sec: give up hole-punch after this */
 
 /** maximum length of command line arguments */
 #define MAX_CMDLINE_BUFFER_LENGTH       4096
@@ -177,6 +177,9 @@ struct n2n_edge
 
     n2n_sock_t          local_sock;             /**< LAN address for same-NAT direct connect */
     int                 local_sock_ena;         /**< 1 if local_sock is valid */
+
+    n2n_sock_t          local_socks[3];         /**< Additional local IPs for multi-homed hosts */
+    int                 local_socks_count;      /**< Number of additional local IPs */
 
     /* UPnP/NAT-PMP */
     uint16_t            upnp_mapped_port;       /**< External port mapped via UPnP/NAT-PMP, 0 if none */
@@ -832,9 +835,11 @@ static inline SOCKET sock_for_dest( const n2n_edge_t * eee, const n2n_sock_t * d
 }
 
 
-/** Send a REGISTER packet to another edge. */
-static void send_register( n2n_edge_t * eee,
-    const n2n_sock_t * remote_peer)
+/** Send a REGISTER packet to another edge.
+ *  If temp_local_sock is provided, use it instead of eee->local_sock in the packet. */
+static void send_register_with_local( n2n_edge_t * eee,
+    const n2n_sock_t * remote_peer,
+    const n2n_sock_t * temp_local_sock)
 {
     uint8_t pktbuf[N2N_PKT_BUF_SIZE];
     size_t idx;
@@ -856,7 +861,11 @@ static void send_register( n2n_edge_t * eee,
     idx=0;
     encode_mac( reg.srcMac, &idx, eee->device.mac_addr );
 
-    if ( eee->local_sock_ena ) {
+    /* Use temp_local_sock if provided, otherwise use eee->local_sock */
+    if ( temp_local_sock && temp_local_sock->family != 0 ) {
+        reg.sock = *temp_local_sock;
+        cmn.flags |= N2N_FLAGS_SOCKET;
+    } else if ( eee->local_sock_ena ) {
         reg.sock = eee->local_sock;
         cmn.flags |= N2N_FLAGS_SOCKET;
     }
@@ -868,6 +877,131 @@ static void send_register( n2n_edge_t * eee,
         sock_to_cstr( sockbuf, remote_peer ) );
 
     sendto_sock( sock_for_dest(eee, remote_peer), pktbuf, idx, remote_peer );
+}
+
+
+/** Check if two IPv4 sockets are on the same /24 or /16 subnet */
+static int same_subnet(const n2n_sock_t *sock1, const n2n_sock_t *sock2) {
+    if (sock1->family == AF_INET && sock2->family == AF_INET) {
+        uint32_t addr1, addr2;
+        memcpy(&addr1, sock1->addr.v4, IPV4_SIZE);
+        memcpy(&addr2, sock2->addr.v4, IPV4_SIZE);
+        addr1 = ntohl(addr1);
+        addr2 = ntohl(addr2);
+        /* Check /24 subnet */
+        if ((addr1 & 0xFFFFFF00) == (addr2 & 0xFFFFFF00))
+            return 1;
+        /* Check /16 subnet */
+        if ((addr1 & 0xFFFF0000) == (addr2 & 0xFFFF0000))
+            return 1;
+    }
+    return 0;
+}
+
+/** Dynamically find best local IP that matches peer's subnet by enumerating all interfaces.
+ *  Returns 1 and fills best_ip if found, 0 if not found. */
+static int find_best_local_ip(n2n_edge_t * eee, const n2n_sock_t * peer_lan_sock, n2n_sock_t * best_ip) {
+    if (!peer_lan_sock || peer_lan_sock->family != AF_INET || !best_ip)
+        return 0;
+    
+    /* Check primary local_sock first */
+    if (eee->local_sock_ena && same_subnet(&eee->local_sock, peer_lan_sock)) {
+        *best_ip = eee->local_sock;
+        return 1;
+    }
+    
+    /* Dynamically enumerate all interfaces to find matching subnet */
+#ifdef _WIN32
+    /* Windows: use GetAdaptersAddresses */
+    ULONG buflen = 15000;
+    IP_ADAPTER_ADDRESSES *pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(buflen);
+    if (pAddresses && GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, pAddresses, &buflen) == NO_ERROR) {
+        IP_ADAPTER_ADDRESSES *pCurrAddresses = pAddresses;
+        while (pCurrAddresses) {
+            IP_ADAPTER_UNICAST_ADDRESS *pUnicast = pCurrAddresses->FirstUnicastAddress;
+            while (pUnicast) {
+                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
+                    struct sockaddr_in *pAddr = (struct sockaddr_in *)pUnicast->Address.lpSockaddr;
+                    uint32_t addr_ip = ntohl(pAddr->sin_addr.s_addr);
+                    int is_private = ((addr_ip >> 24) == 10) ||
+                                     ((addr_ip & 0xFFF00000) == 0xAC100000) ||
+                                     ((addr_ip >> 16) == (192 << 8 | 168));
+                    if (is_private && addr_ip != ntohl(eee->device.ip_addr)) {
+                        /* Skip if same as local_sock (already checked) */
+                        if (eee->local_sock_ena && memcmp(&pAddr->sin_addr.s_addr, eee->local_sock.addr.v4, IPV4_SIZE) == 0) {
+                            pUnicast = pUnicast->Next;
+                            continue;
+                        }
+                        /* Check if this IP matches peer's subnet */
+                        n2n_sock_t candidate;
+                        candidate.family = AF_INET;
+                        memcpy(candidate.addr.v4, &pAddr->sin_addr.s_addr, IPV4_SIZE);
+                        if (same_subnet(&candidate, peer_lan_sock)) {
+                            *best_ip = candidate;
+                            free(pAddresses);
+                            return 1;
+                        }
+                    }
+                }
+                pUnicast = pUnicast->Next;
+            }
+            pCurrAddresses = pCurrAddresses->Next;
+        }
+        free(pAddresses);
+    }
+#else
+    /* Linux/Unix: use getifaddrs */
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr) == 0) {
+        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+            struct sockaddr_in *pAddr;
+            uint32_t addr_ip;
+            int is_private;
+            
+            if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET)
+                continue;
+            /* Skip loopback and n2n interface */
+            if (ifa->ifa_flags & IFF_LOOPBACK)
+                continue;
+            if (strncmp(ifa->ifa_name, "n2n", 3) == 0 || strncmp(ifa->ifa_name, "tun", 3) == 0)
+                continue;
+            /* Skip interfaces without broadcast (point-to-point, VPN) */
+            if (!(ifa->ifa_flags & IFF_BROADCAST))
+                continue;
+            
+            pAddr = (struct sockaddr_in *)ifa->ifa_addr;
+            addr_ip = ntohl(pAddr->sin_addr.s_addr);
+            is_private = ((addr_ip >> 24) == 10) ||
+                         ((addr_ip & 0xFFF00000) == 0xAC100000) ||
+                         ((addr_ip >> 16) == (192 << 8 | 168));
+            if (is_private && addr_ip != ntohl(eee->device.ip_addr)) {
+                /* Skip if same as local_sock (already checked) */
+                if (eee->local_sock_ena && memcpy(&pAddr->sin_addr.s_addr, eee->local_sock.addr.v4, IPV4_SIZE) == 0)
+                    continue;
+                /* Check if this IP matches peer's subnet */
+                n2n_sock_t candidate;
+                candidate.family = AF_INET;
+                memcpy(candidate.addr.v4, &pAddr->sin_addr.s_addr, IPV4_SIZE);
+                if (same_subnet(&candidate, peer_lan_sock)) {
+                    *best_ip = candidate;
+                    freeifaddrs(ifaddr);
+                    return 1;
+                }
+            }
+        }
+        freeifaddrs(ifaddr);
+    }
+#endif
+    
+    return 0;  /* No matching IP found */
+}
+
+
+/** Send a REGISTER packet to another edge (using global local_sock). */
+static void send_register( n2n_edge_t * eee,
+    const n2n_sock_t * remote_peer)
+{
+    send_register_with_local(eee, remote_peer, NULL);
 }
 
 
@@ -916,6 +1050,89 @@ static void set_localip( n2n_edge_t * eee )
                    sock_to_cstr(sockbuf, &eee->local_sock));
     else
         traceEvent(TRACE_WARNING, "set_localip: no private lan address found");
+    
+    /* Collect additional local IPs for multi-homed hosts */
+    eee->local_socks_count = 0;
+    
+#ifdef _WIN32
+    /* Windows: use GetAdaptersAddresses */
+    ULONG buflen = 15000;
+    IP_ADAPTER_ADDRESSES *pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(buflen);
+    if (pAddresses && GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, pAddresses, &buflen) == NO_ERROR) {
+        IP_ADAPTER_ADDRESSES *pCurrAddresses = pAddresses;
+        while (pCurrAddresses && eee->local_socks_count < 3) {
+            IP_ADAPTER_UNICAST_ADDRESS *pUnicast = pCurrAddresses->FirstUnicastAddress;
+            while (pUnicast && eee->local_socks_count < 3) {
+                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
+                    struct sockaddr_in *pAddr = (struct sockaddr_in *)pUnicast->Address.lpSockaddr;
+                    uint32_t addr_ip = ntohl(pAddr->sin_addr.s_addr);
+                    int is_private = ((addr_ip >> 24) == 10) ||
+                                     ((addr_ip & 0xFFF00000) == 0xAC100000) ||
+                                     ((addr_ip >> 16) == (192 << 8 | 168));
+                    if (!is_private || addr_ip == ntohl(eee->device.ip_addr)) {
+                        pUnicast = pUnicast->Next;
+                        continue;
+                    }
+                    /* Skip if same as local_sock */
+                    if (eee->local_sock_ena && memcmp(&pAddr->sin_addr.s_addr, eee->local_sock.addr.v4, IPV4_SIZE) == 0) {
+                        pUnicast = pUnicast->Next;
+                        continue;
+                    }
+                    eee->local_socks[eee->local_socks_count].family = AF_INET;
+                    eee->local_socks[eee->local_socks_count].port = local_port;
+                    memcpy(eee->local_socks[eee->local_socks_count].addr.v4, &pAddr->sin_addr.s_addr, IPV4_SIZE);
+                    eee->local_socks_count++;
+                    traceEvent(TRACE_INFO, "Additional local IP: %s",
+                               sock_to_cstr(sockbuf, &eee->local_socks[eee->local_socks_count-1]));
+                }
+                pUnicast = pUnicast->Next;
+            }
+            pCurrAddresses = pCurrAddresses->Next;
+        }
+        free(pAddresses);
+    }
+#else
+    /* Linux/Unix: use getifaddrs */
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr) == 0) {
+        for (ifa = ifaddr; ifa != NULL && eee->local_socks_count < 3; ifa = ifa->ifa_next) {
+            struct sockaddr_in *pAddr;
+            uint32_t addr_ip;
+            int is_private;
+            
+            if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET)
+                continue;
+            /* Skip loopback and n2n interface */
+            if (ifa->ifa_flags & IFF_LOOPBACK)
+                continue;
+            if (strncmp(ifa->ifa_name, "n2n", 3) == 0 || strncmp(ifa->ifa_name, "tun", 3) == 0)
+                continue;
+            /* Skip interfaces without broadcast (point-to-point, VPN) */
+            if (!(ifa->ifa_flags & IFF_BROADCAST))
+                continue;
+            
+            pAddr = (struct sockaddr_in *)ifa->ifa_addr;
+            addr_ip = ntohl(pAddr->sin_addr.s_addr);
+            is_private = ((addr_ip >> 24) == 10) ||
+                         ((addr_ip & 0xFFF00000) == 0xAC100000) ||
+                         ((addr_ip >> 16) == (192 << 8 | 168));
+            if (is_private && addr_ip != ntohl(eee->device.ip_addr)) {
+                /* Skip if same as local_sock */
+                if (eee->local_sock_ena && memcmp(&pAddr->sin_addr.s_addr, eee->local_sock.addr.v4, IPV4_SIZE) == 0)
+                    continue;
+                eee->local_socks[eee->local_socks_count].family = AF_INET;
+                eee->local_socks[eee->local_socks_count].port = local_port;
+                memcpy(eee->local_socks[eee->local_socks_count].addr.v4, &pAddr->sin_addr.s_addr, IPV4_SIZE);
+                eee->local_socks_count++;
+                traceEvent(TRACE_INFO, "Additional local IP: %s",
+                           sock_to_cstr(sockbuf, &eee->local_socks[eee->local_socks_count-1]));
+            }
+        }
+        freeifaddrs(ifaddr);
+    }
+#endif
+    if (eee->local_socks_count > 0)
+        traceEvent(TRACE_NORMAL, "Found %d additional local IP(s)", eee->local_socks_count);
 }
 
 /** Send a QUERY_PEER packet to supernode asking for target's address. */
@@ -1051,15 +1268,6 @@ static void send_deregister(n2n_edge_t * eee,
     sendto_sock(sock_for_dest(eee, remote_peer), pktbuf, idx, remote_peer);
 }
 
-/** Check if two sockets are on the same public IP (same LAN behind same NAT) */
-static int same_public_ip( const n2n_sock_t * a, const n2n_sock_t * b )
-{
-    if (a->family != b->family) return 0;
-    if (a->family == AF_INET) return (memcmp(a->addr.v4, b->addr.v4, IPV4_SIZE) == 0);
-    if (a->family == AF_INET6) return (memcmp(a->addr.v6, b->addr.v6, IPV6_SIZE) == 0);
-    return 0;
-}
-
 /** Send a PROBE packet directly to a peer to open NAT mapping */
 static void send_probe( n2n_edge_t * eee, const n2n_sock_t * peer_sock, const n2n_mac_t dstMac )
 {
@@ -1128,16 +1336,10 @@ static void start_punch( n2n_edge_t * eee, struct peer_info * peer )
     
     /* Try IPv4 punch if available */
     if ( peer->sock.family == AF_INET ) {
-        /* Don't punch if same public IP (same LAN) - handled separately */
-        if ( !is_empty_ip_address(&eee->my_public_sock) &&
-             same_public_ip(&eee->my_public_sock, &peer->sock) ) {
-            /* Skip IPv4 punch for same LAN */
-        } else {
-            send_probe(eee, &peer->sock, peer->mac_addr);
-            punched = 1;
-            traceEvent(TRACE_INFO, "IPv4 hole-punch started for %s",
-                       macaddr_str(mac_tmp, peer->mac_addr));
-        }
+        send_probe(eee, &peer->sock, peer->mac_addr);
+        punched = 1;
+        traceEvent(TRACE_INFO, "IPv4 hole-punch started for %s",
+                   macaddr_str(mac_tmp, peer->mac_addr));
     }
     
     /* Try IPv6 punch if available and we have IPv6 socket */
@@ -1162,17 +1364,34 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
     struct peer_info * prev = NULL;
     MACSTR_TMP(mac_tmp);
     while ( scan ) {
-        /* LAN punch: if no ACK within 15 seconds, fall back to WAN punch */
+        /* LAN punch phase: retransmit REGISTER to LAN address */
         if ( scan->num_sockets == 2 && !scan->lan_punch_done &&
-             scan->lan_punch_start != 0 &&
-             (now - scan->lan_punch_start) >= 15 )
+             scan->lan_punch_start != 0 )
         {
-            scan->lan_punch_done = 1;
-            traceEvent(TRACE_INFO, "LAN punch timeout for %s - trying WAN",
-                       macaddr_str(mac_tmp, scan->mac_addr));
-            send_register(eee, &scan->sockets[0]);
-            send_register(eee, &(eee->supernode));
-            start_punch(eee, scan);
+            time_t lan_elapsed = now - scan->lan_punch_start;
+            
+            /* Retransmit REGISTER every 1s for first 3s */
+            if ( lan_elapsed < 3 && (now - scan->last_seen) >= 1 )
+            {
+                /* Use temp_local_sock if valid (dynamically selected best IP) */
+                if (scan->temp_local_sock_valid) {
+                    send_register_with_local(eee, &scan->sockets[1], &scan->temp_local_sock);
+                } else {
+                    send_register(eee, &scan->sockets[1]);
+                }
+                scan->last_seen = now;
+            }
+            
+            /* LAN punch timeout: fall back to WAN punch */
+            if ( lan_elapsed >= 3 )
+            {
+                scan->lan_punch_done = 1;
+                traceEvent(TRACE_INFO, "LAN punch timeout for %s - trying WAN",
+                           macaddr_str(mac_tmp, scan->mac_addr));
+                send_register(eee, &scan->sockets[0]);
+                send_register(eee, &(eee->supernode));
+                start_punch(eee, scan);
+            }
         }
 
         if ( scan->punch_start_time != 0 &&
@@ -1185,10 +1404,10 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
                        PEER_ID(mac_tmp, scan));
         } else if ( scan->punch_start_time != 0 &&
                     !scan->punch_failed &&
-                    (now - scan->punch_start_time) <= 5 &&
+                    (now - scan->punch_start_time) <= 3 &&
                     (now - scan->last_punch_probe) >= 1 )
         {
-            /* Retransmit PROBE every 1s for first 5s */
+            /* Retransmit PROBE every 1s for first 3s */
             int sent_probe = 0;
             
             /* Try IPv4 if available */
@@ -1205,6 +1424,31 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
             
             if (sent_probe) {
                 scan->last_punch_probe = now;
+            }
+        } else if ( scan->register_retry_count > 0 && !scan->punch_failed )
+        {
+            if ( scan->register_retry_count < 3 &&
+                 (now - scan->last_register_sent) >= 1 )
+            {
+                n2n_sock_t *target_addr = (scan->sock.family == AF_INET) ? &scan->sock : &scan->sock6;
+                if (target_addr->family != 0) {
+                    send_register(eee, target_addr);
+                    send_register(eee, &(eee->supernode));
+                }
+                scan->register_retry_count++;
+                scan->last_register_sent = now;
+                traceEvent(TRACE_INFO, "REGISTER retry %u/3 for %s",
+                           scan->register_retry_count,
+                           macaddr_str(mac_tmp, scan->mac_addr));
+            }
+            else if ( scan->register_retry_count >= 3 &&
+                      (now - scan->last_register_sent) >= 1 )
+            {
+                scan->punch_failed = 1;
+                scan->punch_reset_time = now;
+                scan->register_retry_count = 0;
+                traceEvent(TRACE_NORMAL, "REGISTER retries exhausted for %s, PsP",
+                           PEER_ID(mac_tmp, scan));
             }
         } else if ( scan->punch_start_time == 0 && !scan->punch_failed &&
                     scan->last_seen != 0 &&
@@ -1238,6 +1482,7 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
             scan->punch_start_time = 0;
             scan->lan_punch_done = 0;
             scan->lan_punch_start = 0;
+            scan->register_retry_count = 0;
             traceEvent(TRACE_INFO, "Retrying P2P punch for %s (attempt %u/3)",
                        PEER_ID(mac_tmp, scan),
                        scan->punch_retry_count);
@@ -1424,6 +1669,7 @@ void try_send_register( n2n_edge_t * eee,
         scan->last_seen = n2n_now();
         scan->punch_start_time = 0;
         scan->punch_failed = 0;
+        scan->register_retry_count = 0;
 
         strncpy(scan->version, n2n_sw_version, sizeof(scan->version) - 1);
         strncpy(scan->os_name, n2n_sw_osName, sizeof(scan->os_name) - 1);
@@ -1451,6 +1697,7 @@ void try_send_register( n2n_edge_t * eee,
             scan->sockets[0] = *peer;
             scan->punch_start_time = 0;
             scan->punch_failed = 0;
+            scan->register_retry_count = 0;
             scan->lan_punch_start = 0;
             scan->lan_punch_done = 0;
             send_register(eee, peer);
@@ -1471,6 +1718,21 @@ void try_send_register_lan( n2n_edge_t * eee,
                         const n2n_sock_t * local_sock )
 {
     struct peer_info * scan = find_peer_by_mac( eee->pending_peers, mac );
+    n2n_sock_t found_ip;
+    n2n_sock_t best_local_sock;
+    n2n_sock_str_t sockbuf;
+    int found = 0;
+    
+    /* Dynamically find best local IP that matches peer's subnet */
+    if (find_best_local_ip(eee, local_sock, &found_ip)) {
+        /* Found a better IP, prepare it with correct port */
+        best_local_sock.family = found_ip.family;
+        memcpy(best_local_sock.addr.v4, found_ip.addr.v4, IPV4_SIZE);
+        best_local_sock.port = eee->local_sock.port;  /* Use our own port */
+        found = 1;
+        traceEvent(TRACE_INFO, "Found better local IP %s for peer's subnet",
+                   sock_to_cstr(sockbuf, &best_local_sock));
+    }
 
     if ( NULL == scan ) {
         scan = (struct peer_info*) calloc( 1, sizeof( struct peer_info ) );
@@ -1489,6 +1751,14 @@ void try_send_register_lan( n2n_edge_t * eee,
         scan->last_seen    = n2n_now();
         scan->lan_punch_start = n2n_now();
         scan->lan_punch_done  = 0;
+        
+        /* Save temp_local_sock for LAN punch retransmissions */
+        if (found) {
+            scan->temp_local_sock = best_local_sock;
+            scan->temp_local_sock_valid = 1;
+        } else {
+            scan->temp_local_sock_valid = 0;
+        }
 
         peer_list_add( &(eee->pending_peers), scan );
     } else {
@@ -1505,10 +1775,24 @@ void try_send_register_lan( n2n_edge_t * eee,
         scan->lan_punch_done  = 0;
         scan->punch_start_time = 0;
         scan->punch_failed = 0;
+        scan->register_retry_count = 0;
+        
+        /* Save temp_local_sock for LAN punch retransmissions */
+        if (found) {
+            scan->temp_local_sock = best_local_sock;
+            scan->temp_local_sock_valid = 1;
+        } else {
+            scan->temp_local_sock_valid = 0;
+        }
     }
 
-    /* Send REGISTER only to LAN address first */
-    send_register(eee, local_sock);
+    /* Send REGISTER to peer's LAN address, using best local IP if found */
+    if (found) {
+        send_register_with_local(eee, local_sock, &best_local_sock);
+    } else {
+        send_register(eee, local_sock);
+    }
+    
     {
         MACSTR_TMP(mac_tmp);
         traceEvent(TRACE_INFO, "LAN punch started for %s", macaddr_str(mac_tmp, mac));
@@ -1600,6 +1884,7 @@ void set_peer_operational( n2n_edge_t * eee,
         scan->last_seen = n2n_now();
         scan->punch_start_time = 0;
         scan->punch_failed = 0;
+        scan->register_retry_count = 0;
         
         /* Report P2P connection */
         if ( scan->first_seen != 1 ) {
@@ -2700,14 +2985,12 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 PEERS_LOCK(eee);
                 struct peer_info *scan = find_peer_by_mac(eee->known_peers, reg.srcMac);
                 if (NULL == scan) {
-                    /* If reg.sock carries a LAN address and public IP matches, try LAN */
                     if ( reg.sock.family != 0 && reg.sock.port != 0 &&
                          eee->local_sock_ena &&
                          eee->my_public_sock.family == AF_INET &&
                          sender.family == AF_INET &&
                          memcmp(eee->my_public_sock.addr.v4, sender.addr.v4, IPV4_SIZE) == 0 )
                     {
-                        /* Use sender's public port for LAN address */
                         n2n_sock_t lan_sock = reg.sock;
                         lan_sock.port = orig_sender->port;
                         traceEvent(TRACE_INFO, "Rx REGISTER with LAN addr %s - trying LAN direct",
@@ -2717,53 +3000,17 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                         try_send_register(eee, from_supernode, reg.srcMac, orig_sender);
                     }
                 } else {
-                    /* Already in known_peers - check if address changed (same protocol family only) */
                     int peer_uses_ipv4 = (scan->sock.family == AF_INET);
-                    int peer_uses_ipv6 = (scan->sock6.family == AF_INET6);
                     int register_is_ipv4 = (orig_sender->family == AF_INET);
-                    
-                    /* Only process if REGISTER matches peer's active protocol */
-                    if ((peer_uses_ipv4 && register_is_ipv4) || (peer_uses_ipv6 && !register_is_ipv4)) {
+                    if ((peer_uses_ipv4 && register_is_ipv4) || (!peer_uses_ipv4 && !register_is_ipv4)) {
                         n2n_sock_t *expected_sock = peer_uses_ipv4 ? &scan->sock : &scan->sock6;
-                        if ( 0 != sock_equal( expected_sock, orig_sender ) ) {
-                            /* Address changed: update and send REGISTER back so A can update us */
-                            traceEvent(TRACE_INFO, "Peer %s addr changed, sending REGISTER back",
-                                       macaddr_str(mac_buf1, reg.srcMac));
-                            update_peer_address(eee, from_supernode, reg.srcMac, orig_sender, n2n_now());
-                            /* Clear keepalive state so traffic flows directly to new address */
-                            scan->last_probe_sent = 0;
-                            scan->keepalive_fails = 0;
+                        if (sock_equal(expected_sock, orig_sender) != 0) {
+                            *expected_sock = *orig_sender;
+                            scan->sockets[0] = *orig_sender;
+                            scan->last_seen = n2n_now();
                             send_register(eee, orig_sender);
-
-                            /* *** Move peer back to pending_peers for re-punch *** */
-                            struct peer_info *prev = NULL, *curr = eee->known_peers;
-                            while (curr && memcmp(curr->mac_addr, reg.srcMac, N2N_MAC_SIZE) != 0) {
-                                prev = curr;
-                                curr = curr->next;
-                            }
-                            if (curr) {
-                                /* Remove from known_peers */
-                                if (prev) prev->next = curr->next;
-                                else eee->known_peers = curr->next;
-
-                                /* Reset punch state */
-                                curr->punch_start_time = 0;
-                                curr->punch_failed = 0;
-                                curr->lan_punch_start = 0;
-                                curr->lan_punch_done = 0;
-
-                                /* Add to pending_peers */
-                                curr->next = eee->pending_peers;
-                                eee->pending_peers = curr;
-
-                                /* Start hole punching */
-                                start_punch(eee, curr);
-
-                                traceEvent(TRACE_INFO, "Moved peer %s back to pending for re-punch",
-                                           macaddr_str(mac_buf1, reg.srcMac));
-                            }
                         } else {
-                            update_peer_address(eee, from_supernode, reg.srcMac, orig_sender, n2n_now());
+                            scan->last_seen = n2n_now();
                         }
                     }
                 }
@@ -2868,7 +3115,9 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 if (target_addr->family != 0) {
                     send_register(eee, target_addr);
                     send_register(eee, &(eee->supernode));
-                    traceEvent(TRACE_INFO, "PROBE_ACK: retrying REGISTER to %s",
+                    scan->register_retry_count = 1;
+                    scan->last_register_sent = now;
+                    traceEvent(TRACE_INFO, "PROBE_ACK: REGISTER sent to %s (attempt 1/3)",
                                macaddr_str(mac_buf1, ack.dstMac));
                 }
             }
@@ -2876,168 +3125,161 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
         }
         else if(msg_type == n2n_peer_info)
         {
-            /* Supernode pushed a peer's address to us - start hole-punch immediately. */
             n2n_PEER_INFO_t pi;
             decode_PEER_INFO(&pi, &cmn, udp_buf, &rem, &idx);
 
-            traceEvent(TRACE_INFO, "Rx PEER_INFO for %s at %s - starting punch",
+            int do_punch = (pi.aflags & N2N_AFLAGS_PUNCH_REQUEST) != 0;
+
+            traceEvent(TRACE_INFO, "Rx PEER_INFO for %s at %s%s",
                        macaddr_str(mac_buf1, pi.mac),
-                       sock_to_cstr(sockbuf1, &pi.sockets[0]));
+                       sock_to_cstr(sockbuf1, &pi.sockets[0]),
+                       do_punch ? " [PUNCH]" : "");
 
             PEERS_LOCK(eee);
             struct peer_info *known = find_peer_by_mac(eee->known_peers, pi.mac);
-            if (!known) {
-                /* New peer: try both IPv6 and IPv4 if available for maximum connectivity */
-                int tried_ipv6 = 0;
-                
-                /* Try IPv6 if peer has IPv6 and we have IPv6 socket */
-                if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) &&
-                    pi.sock6.family == AF_INET6 &&
-                    eee->udp_sock6 != -1)
-                {
-                    traceEvent(TRACE_INFO, "IPv6 direct: trying %s",
-                               sock_to_cstr(sockbuf1, &pi.sock6));
-                    try_send_register(eee, 1, pi.mac, &pi.sock6);
-                    tried_ipv6 = 1;
-                }
-                
-                /* Also try IPv4 if available (parallel punch for dual-stack) */
-                if (pi.sockets[0].family == AF_INET)
-                {
-                    /* Check for LAN direct first */
-                    if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
-                        pi.sockets[1].family != 0 && pi.sockets[1].port != 0 &&
-                        eee->my_public_sock.family == AF_INET &&
-                        memcmp(eee->my_public_sock.addr.v4, pi.sockets[0].addr.v4, IPV4_SIZE) == 0)
-                    {
-                        n2n_sock_t lan_sock = pi.sockets[1];
-                        lan_sock.port = pi.sockets[0].port;
-                        traceEvent(TRACE_INFO, "Same public IP - trying LAN direct: %s",
-                                   sock_to_cstr(sockbuf1, &lan_sock));
-                        try_send_register_lan(eee, 1, pi.mac, &pi.sockets[0], &lan_sock);
+            struct peer_info *pending = find_peer_by_mac(eee->pending_peers, pi.mac);
+
+            if (!do_punch) {
+                if (known) {
+                    int addr_changed = 0;
+                    if (pi.sockets[0].family == AF_INET && known->sock.family == AF_INET) {
+                        if (sock_equal(&known->sock, &pi.sockets[0]) != 0) {
+                            addr_changed = 1;
+                        }
                     }
-                    else
-                    {
-                        if (tried_ipv6)
-                            traceEvent(TRACE_INFO, "IPv4 direct: also trying %s",
-                                       sock_to_cstr(sockbuf1, &pi.sockets[0]));
-                        try_send_register(eee, 1, pi.mac, &pi.sockets[0]);
-                    }
-                }
-                else if (pi.sockets[0].family == AF_INET6 && eee->udp_sock6 == -1)
-                {
-                    /* Peer is IPv6-only but we have no IPv6 socket - relay only */
-                    traceEvent(TRACE_DEBUG, "Peer %s is IPv6-only but no local IPv6 socket, relay only",
-                               macaddr_str(mac_buf1, pi.mac));
-                }
-                else if (!tried_ipv6)
-                {
-                    /* Fallback: try sockets[0] if we haven't tried IPv6 */
-                    try_send_register(eee, 1, pi.mac, &pi.sockets[0]);
-                }
-                
-                /* Store sock6 and version/os_name into pending_peer */
-                {
-                    struct peer_info *pp = find_peer_by_mac(eee->pending_peers, pi.mac);
-                    if (pp) {
+
+                    if (!addr_changed) {
+                        if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
+                            pi.sockets[1].family != 0 && pi.sockets[1].port != 0) {
+                            known->sockets[1] = pi.sockets[1];
+                            known->num_sockets = 2;
+                        }
                         if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6)
-                            pp->sock6 = pi.sock6;
-                        if (pi.version[0] != '\0')
-                            strncpy(pp->version, pi.version, sizeof(pp->version) - 1);
-                        if (pi.os_name[0] != '\0')
-                            strncpy(pp->os_name, pi.os_name, sizeof(pp->os_name) - 1);
+                            known->sock6 = pi.sock6;
+                        if (pi.version[0]) strncpy(known->version, pi.version, sizeof(known->version) - 1);
+                        if (pi.os_name[0]) strncpy(known->os_name, pi.os_name, sizeof(known->os_name) - 1);
+                        known->last_seen = n2n_now();
+                        PEERS_UNLOCK(eee);
+                        return;
+                    }
+
+                    struct peer_info *prev = NULL, *scan = eee->known_peers;
+                    while (scan && memcmp(scan->mac_addr, pi.mac, N2N_MAC_SIZE) != 0) {
+                        prev = scan; scan = scan->next;
+                    }
+                    if (scan) {
+                        if (prev) prev->next = scan->next;
+                        else eee->known_peers = scan->next;
+                        scan->next = eee->pending_peers;
+                        eee->pending_peers = scan;
+                        pending = scan;
                     }
                 }
-            } else {
-                /* Known peer: check if address changed (only check active protocol) */
-                int known_uses_ipv4 = (known->sock.family == AF_INET);
-                int known_uses_ipv6 = (known->sock6.family == AF_INET6);
-                
-                int addr_changed = 0;
-                
-                /* Check if the active protocol's address changed */
-                if (known_uses_ipv4 && pi.sockets[0].family == AF_INET) {
-                    addr_changed = (0 != sock_equal(&known->sock, &pi.sockets[0]));
-                } else if (known_uses_ipv6 && (pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && 
-                           pi.sock6.family == AF_INET6) {
-                    addr_changed = (0 != sock_equal(&known->sock6, &pi.sock6));
+                if (pending) {
+                    if (pi.sockets[0].family == AF_INET) {
+                        pending->sock = pi.sockets[0];
+                        pending->sockets[0] = pi.sockets[0];
+                    }
+                    if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
+                        pi.sockets[1].family != 0 && pi.sockets[1].port != 0) {
+                        pending->sockets[1] = pi.sockets[1];
+                        pending->num_sockets = 2;
+                    }
+                    if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6)
+                        pending->sock6 = pi.sock6;
+                    if (pi.version[0]) strncpy(pending->version, pi.version, sizeof(pending->version) - 1);
+                    if (pi.os_name[0]) strncpy(pending->os_name, pi.os_name, sizeof(pending->os_name) - 1);
+                    pending->last_seen = n2n_now();
+                    PEERS_UNLOCK(eee);
+                    return;
                 }
-                
-                if (addr_changed) {
-                    /* Check if known->sock is the LAN address matching pi.sockets[1] */
-                    int lan_match = (pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
-                                    known_uses_ipv4 &&
-                                    sock_equal(&known->sock, &pi.sockets[1]) == 0;
-                    if (!lan_match) {
-                        /* Peer address changed: move back to pending and re-punch */
-                        traceEvent(TRACE_INFO, "Peer %s addr changed, re-punching",
-                                   macaddr_str(mac_buf1, pi.mac));
-                        /* Remove from known_peers */
-                        struct peer_info *prev = NULL, *scan = eee->known_peers;
-                        while (scan && memcmp(scan->mac_addr, pi.mac, N2N_MAC_SIZE) != 0) {
-                            prev = scan; scan = scan->next;
-                        }
-                        if (scan) {
-                            if (prev) prev->next = scan->next;
-                            else eee->known_peers = scan->next;
-                            free(scan);
-                        }
-                        /* Re-punch with new address - try both IPv4 and IPv6 if available */
-                        int repunched = 0;
-                        if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) &&
-                            pi.sock6.family == AF_INET6 &&
-                            eee->udp_sock6 != -1)
-                        {
-                            traceEvent(TRACE_INFO, "IPv6 direct re-punch: %s",
-                                       sock_to_cstr(sockbuf1, &pi.sock6));
-                            try_send_register(eee, 1, pi.mac, &pi.sock6);
-                            repunched = 1;
-                        }
-                        
-                        if (pi.sockets[0].family == AF_INET)
-                        {
-                            if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
-                                pi.sockets[1].family != 0 && pi.sockets[1].port != 0 &&
-                                eee->my_public_sock.family == AF_INET &&
-                                memcmp(eee->my_public_sock.addr.v4, pi.sockets[0].addr.v4, IPV4_SIZE) == 0)
-                            {
-                                n2n_sock_t lan_sock = pi.sockets[1];
-                                lan_sock.port = pi.sockets[0].port;
-                                try_send_register_lan(eee, 1, pi.mac, &pi.sockets[0], &lan_sock);
-                            }
-                            else
-                            {
-                                if (repunched)
-                                    traceEvent(TRACE_INFO, "IPv4 direct re-punch: also trying %s",
-                                               sock_to_cstr(sockbuf1, &pi.sockets[0]));
-                                try_send_register(eee, 1, pi.mac, &pi.sockets[0]);
-                            }
-                        }
-                        else if (pi.sockets[0].family == AF_INET6 && eee->udp_sock6 == -1)
-                        {
-                            traceEvent(TRACE_DEBUG, "Peer %s re-punch: IPv6-only but no local IPv6 socket, relay only",
-                                       macaddr_str(mac_buf1, pi.mac));
-                        }
-                        else if (!repunched)
-                        {
-                            /* Fallback: try sockets[0] if we haven't tried IPv6 */
-                            try_send_register(eee, 1, pi.mac, &pi.sockets[0]);
-                        }
-                        /* Store sock6 and version/os_name into pending_peer */
-                        {
-                            struct peer_info *pp = find_peer_by_mac(eee->pending_peers, pi.mac);
-                            if (pp) {
-                                if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6)
-                                    pp->sock6 = pi.sock6;
-                                if (pi.version[0] != '\0')
-                                    strncpy(pp->version, pi.version, sizeof(pp->version) - 1);
-                                if (pi.os_name[0] != '\0')
-                                    strncpy(pp->os_name, pi.os_name, sizeof(pp->os_name) - 1);
-                            }
-                        }
-                    } /* end if (!lan_match) */
+                pending = calloc(1, sizeof(struct peer_info));
+                if (!pending) { PEERS_UNLOCK(eee); return; }
+                memcpy(pending->mac_addr, pi.mac, N2N_MAC_SIZE);
+                pending->sock = pi.sockets[0];
+                pending->sockets[0] = pi.sockets[0];
+                pending->num_sockets = 1;
+                if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
+                    pi.sockets[1].family != 0 && pi.sockets[1].port != 0) {
+                    pending->sockets[1] = pi.sockets[1];
+                    pending->num_sockets = 2;
+                }
+                if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6)
+                    pending->sock6 = pi.sock6;
+                if (pi.version[0]) strncpy(pending->version, pi.version, sizeof(pending->version) - 1);
+                if (pi.os_name[0]) strncpy(pending->os_name, pi.os_name, sizeof(pending->os_name) - 1);
+                pending->last_seen = n2n_now();
+                peer_list_add(&eee->pending_peers, pending);
+                PEERS_UNLOCK(eee);
+                return;
+            }
+
+            /* --- PUNCH_REQUEST: start hole punching --- */
+
+            if (known) {
+                struct peer_info *prev = NULL, *scan = eee->known_peers;
+                while (scan && memcmp(scan->mac_addr, pi.mac, N2N_MAC_SIZE) != 0) {
+                    prev = scan; scan = scan->next;
+                }
+                if (scan) {
+                    if (prev) prev->next = scan->next;
+                    else eee->known_peers = scan->next;
+                    scan->next = eee->pending_peers;
+                    eee->pending_peers = scan;
+                    pending = scan;
                 }
             }
+
+            if (!pending) {
+                pending = calloc(1, sizeof(struct peer_info));
+                if (!pending) { PEERS_UNLOCK(eee); return; }
+                memcpy(pending->mac_addr, pi.mac, N2N_MAC_SIZE);
+                peer_list_add(&eee->pending_peers, pending);
+            }
+
+            if (pi.sockets[0].family == AF_INET6) pending->sock6 = pi.sockets[0];
+            else pending->sock = pi.sockets[0];
+            pending->sockets[0] = pi.sockets[0];
+            if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
+                pi.sockets[1].family != 0 && pi.sockets[1].port != 0) {
+                pending->sockets[1] = pi.sockets[1];
+                pending->num_sockets = 2;
+            } else {
+                pending->num_sockets = 1;
+            }
+            if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6)
+                pending->sock6 = pi.sock6;
+            if (pi.version[0]) strncpy(pending->version, pi.version, sizeof(pending->version) - 1);
+            if (pi.os_name[0]) strncpy(pending->os_name, pi.os_name, sizeof(pending->os_name) - 1);
+            pending->last_seen = n2n_now();
+            pending->punch_start_time = 0;
+            pending->punch_failed = 0;
+            pending->register_retry_count = 0;
+
+            if (pending->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
+                try_send_register(eee, 1, pi.mac, &pending->sock6);
+            } else {
+                int same_lan = (pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
+                                pi.sockets[1].family != 0 && pi.sockets[1].port != 0 &&
+                                eee->my_public_sock.family == AF_INET &&
+                                pi.sockets[0].family == AF_INET &&
+                                memcmp(eee->my_public_sock.addr.v4, pi.sockets[0].addr.v4, IPV4_SIZE) == 0;
+                if (same_lan) {
+                    n2n_sock_t lan_sock = pi.sockets[1];
+                    lan_sock.port = pi.sockets[0].port;
+                    traceEvent(TRACE_INFO, "Same public IP - trying LAN direct: %s",
+                               sock_to_cstr(sockbuf1, &lan_sock));
+                    try_send_register_lan(eee, 1, pi.mac, &pi.sockets[0], &lan_sock);
+                } else {
+                    try_send_register(eee, 1, pi.mac, &pending->sock);
+                    if (pending->num_sockets >= 2 && pending->sockets[1].family != 0 && pending->sockets[1].port != 0) {
+                        n2n_sock_t lan_sock = pending->sockets[1];
+                        lan_sock.port = pending->sockets[0].port;
+                        send_register(eee, &lan_sock);
+                    }
+                }
+            }
+
             PEERS_UNLOCK(eee);
         }
         else if(msg_type == MSG_TYPE_REGISTER_SUPER_ACK)

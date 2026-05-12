@@ -379,8 +379,9 @@ size_t decode_PACKET( n2n_PACKET_t * pkt,
 
 /* PEER_INFO: supernode -> edge, push a peer's address */
 #define N2N_AFLAGS_IPV6_SOCKET   0x0002  /* sock6 field is valid */
+#define N2N_AFLAGS_PUNCH_REQUEST 0x0004  /* QUERY_PEER triggered, edge should start punching */
 typedef struct n2n_PEER_INFO {
-    uint16_t   aflags;       /* N2N_AFLAGS_LOCAL_SOCKET if sockets[1] valid, N2N_AFLAGS_IPV6_SOCKET if sock6 valid */
+    uint16_t   aflags;       /* N2N_AFLAGS_LOCAL_SOCKET if sockets[1] valid, N2N_AFLAGS_IPV6_SOCKET if sock6 valid, N2N_AFLAGS_PUNCH_REQUEST if should punch */
     n2n_mac_t  mac;
     n2n_sock_t sockets[2];  /* [0]=public IPv4, [1]=LAN (if aflags set) */
     n2n_sock_t sock6;       /* IPv6 public address (if N2N_AFLAGS_IPV6_SOCKET set) */

@@ -1551,9 +1551,11 @@ static int process_udp( n2n_sn_t * sss,
             memcpy( cmn2.community, cmn.community, sizeof(n2n_community_t) );
 
             memcpy( pi.mac, query.targetMac, N2N_MAC_SIZE );
-            pi.aflags = (target->num_sockets > 1 &&
-                         target->sockets[1].family != 0 &&
-                         target->sockets[1].port != 0) ? N2N_AFLAGS_LOCAL_SOCKET : 0;
+            pi.aflags = N2N_AFLAGS_PUNCH_REQUEST;
+            if (target->num_sockets > 1 &&
+                target->sockets[1].family != 0 &&
+                target->sockets[1].port != 0)
+                pi.aflags |= N2N_AFLAGS_LOCAL_SOCKET;
             pi.sockets[0] = target->sockets[0];
             if (pi.aflags & N2N_AFLAGS_LOCAL_SOCKET)
                 pi.sockets[1] = target->sockets[1];
@@ -1587,9 +1589,11 @@ static int process_udp( n2n_sn_t * sss,
                 memcpy( cmn3.community, cmn.community, sizeof(n2n_community_t) );
 
                 memcpy( pi2.mac, query.srcMac, N2N_MAC_SIZE );
-                pi2.aflags = (requester->num_sockets > 1 &&
-                              requester->sockets[1].family != 0 &&
-                              requester->sockets[1].port != 0) ? N2N_AFLAGS_LOCAL_SOCKET : 0;
+                pi2.aflags = N2N_AFLAGS_PUNCH_REQUEST;
+                if (requester->num_sockets > 1 &&
+                    requester->sockets[1].family != 0 &&
+                    requester->sockets[1].port != 0)
+                    pi2.aflags |= N2N_AFLAGS_LOCAL_SOCKET;
                 pi2.sockets[0] = requester->sockets[0];
                 if (pi2.aflags & N2N_AFLAGS_LOCAL_SOCKET)
                     pi2.sockets[1] = requester->sockets[1];
@@ -1769,11 +1773,8 @@ static int process_udp( n2n_sn_t * sss,
                                macaddr_str(mac_buf, p->mac_addr),
                                macaddr_str(mac_buf2, reg.edgeMac));
 
-                    /* Do NOT push new edge's info to existing peers on registration.
-                     * Peers will learn about each other only when they actually communicate
-                     * (via QUERY_PEER mechanism). This prevents unnecessary peer discovery
-                     * and maintains privacy - other peers don't know when a new edge joins. */
-                    #if 0
+                    /* Push new edge's info to all existing peers so they can update their records.
+                     * No PUNCH_REQUEST flag - peers just save the info, don't start punching. */
                     {
                         struct sockaddr_storage peer_sa;
                         socklen_t peer_sa_len;
@@ -1801,7 +1802,6 @@ static int process_udp( n2n_sn_t * sss,
                         traceEvent(TRACE_DEBUG, "pushed A's new addr to peer %s (simultaneous open)",
                                    macaddr_str(mac_buf, p->mac_addr));
                     }
-                    #endif
                 }
                 p = p->next;
             }
