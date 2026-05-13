@@ -1400,8 +1400,11 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
         {
             scan->punch_failed = 1;
             scan->punch_reset_time = now;
-            traceEvent(TRACE_NORMAL, "PsP (supernode relay) for %s",
-                       PEER_ID(mac_tmp, scan));
+            if (!scan->psp_logged) {
+                traceEvent(TRACE_NORMAL, "PsP (supernode relay) for %s",
+                           PEER_ID(mac_tmp, scan));
+                scan->psp_logged = 1;
+            }
         } else if ( scan->punch_start_time != 0 &&
                     !scan->punch_failed &&
                     (now - scan->punch_start_time) <= 3 &&
@@ -1447,8 +1450,11 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
                 scan->punch_failed = 1;
                 scan->punch_reset_time = now;
                 scan->register_retry_count = 0;
-                traceEvent(TRACE_NORMAL, "REGISTER retries exhausted for %s, PsP",
-                           PEER_ID(mac_tmp, scan));
+                if (!scan->psp_logged) {
+                    traceEvent(TRACE_NORMAL, "REGISTER retries exhausted for %s, PsP",
+                               PEER_ID(mac_tmp, scan));
+                    scan->psp_logged = 1;
+                }
             }
         } else if ( scan->punch_start_time == 0 && !scan->punch_failed &&
                     scan->last_seen != 0 &&
@@ -1463,27 +1469,35 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
             scan = scan->next;
             free(tmp);
             continue;
-        } else if ( scan->punch_failed &&
-                    (now - scan->punch_reset_time) > 300 )
+        } else if ( scan->punch_failed )
         {
-            scan->punch_retry_count++;
             if ( scan->punch_retry_count >= 3 ) {
-                traceEvent(TRACE_NORMAL, "Giving up on %s after %u punch retries, relay only",
-                           PEER_ID(mac_tmp, scan),
-                           scan->punch_retry_count);
                 prev = scan;
                 scan = scan->next;
                 continue;
             }
-            scan->punch_failed = 0;
-            scan->punch_start_time = 0;
-            scan->lan_punch_done = 0;
-            scan->lan_punch_start = 0;
-            scan->register_retry_count = 0;
-            traceEvent(TRACE_INFO, "Retrying P2P punch for %s (attempt %u/3)",
-                       PEER_ID(mac_tmp, scan),
-                       scan->punch_retry_count);
-            start_punch(eee, scan);
+            if ( (now - scan->punch_reset_time) > 300 )
+            {
+                scan->punch_retry_count++;
+                if ( scan->punch_retry_count >= 3 ) {
+                    traceEvent(TRACE_NORMAL, "Giving up on %s after %u punch retries, relay only",
+                               PEER_ID(mac_tmp, scan),
+                               scan->punch_retry_count);
+                    prev = scan;
+                    scan = scan->next;
+                    continue;
+                }
+                scan->punch_failed = 0;
+                scan->punch_start_time = 0;
+                scan->lan_punch_done = 0;
+                scan->lan_punch_start = 0;
+                scan->register_retry_count = 0;
+                scan->psp_logged = 0;
+                traceEvent(TRACE_INFO, "Retrying P2P punch for %s (attempt %u/3)",
+                           PEER_ID(mac_tmp, scan),
+                           scan->punch_retry_count);
+                start_punch(eee, scan);
+            }
         }
         prev = scan;
         scan = scan->next;
@@ -1593,6 +1607,8 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                     scan->lan_punch_start  = 0;
                     scan->lan_punch_done   = 0;
                     scan->direct_seen         = 0;
+                    scan->p2p_logged       = 0;
+                    scan->psp_logged       = 0;
                     send_query_peer(eee, scan->mac_addr);
                     start_punch(eee, scan);
                     scan = next;
@@ -1698,10 +1714,12 @@ void try_send_register( n2n_edge_t * eee,
             scan->register_retry_count = 0;
             scan->lan_punch_start = 0;
             scan->lan_punch_done = 0;
+            scan->psp_logged = 0;
             send_register(eee, peer);
             send_register(eee, &(eee->supernode));
             start_punch(eee, scan);
         } else if ( scan->punch_start_time == 0 && !scan->punch_failed ) {
+            scan->psp_logged = 0;
             start_punch(eee, scan);
         }
     }
@@ -1774,6 +1792,7 @@ void try_send_register_lan( n2n_edge_t * eee,
         scan->punch_start_time = 0;
         scan->punch_failed = 0;
         scan->register_retry_count = 0;
+        scan->psp_logged = 0;
         
         /* Save temp_local_sock for LAN punch retransmissions */
         if (found) {
@@ -1884,13 +1903,15 @@ void set_peer_operational( n2n_edge_t * eee,
         scan->punch_start_time = 0;
         scan->punch_failed = 0;
         scan->register_retry_count = 0;
+        scan->psp_logged = 0;
 
-        {
+        if (!scan->p2p_logged) {
             char mac_buf[18];
             n2n_sock_str_t sockbuf;
             traceEvent( TRACE_NORMAL, "P2P direct with %s at %s (%s)",
                         PEER_ID(mac_buf, scan), sock_to_cstr( sockbuf, peer ),
                         (peer->family == AF_INET6) ? "IPv6" : "IPv4" );
+            scan->p2p_logged = 1;
         }
 
         /* Send REGISTER back to confirm our new address to the peer */
@@ -3259,6 +3280,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
             pending->punch_start_time = 0;
             pending->punch_failed = 0;
             pending->register_retry_count = 0;
+            pending->psp_logged = 0;
 
             if (pending->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
                 try_send_register(eee, 1, pi.mac, &pending->sock6);

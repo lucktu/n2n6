@@ -244,6 +244,8 @@ struct peer_info {
     time_t              direct_seen;       /* time of last direct P2P communication with this peer; 0=never */
     n2n_sock_t          temp_local_sock;   /* dynamically selected best local IP for this peer */
     uint8_t             temp_local_sock_valid; /* 1 if temp_local_sock is valid */
+    uint8_t             psp_logged;        /* 1 if PsP message already printed for current state */
+    uint8_t             p2p_logged;        /* 1 if P2P direct message already printed for current state */
 };
 
 struct n2n_edge; /* defined in edge.c */
