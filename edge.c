@@ -1542,13 +1542,6 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
         struct peer_info *next = scan->next;
         time_t idle = now - scan->last_seen;
 
-        /* Skip keepalive for peers using relay (punch_failed=1) */
-        if ( scan->punch_failed ) {
-            prev = scan;
-            scan = next;
-            continue;
-        }
-
         /* Determine which address to use for keepalive (prefer IPv4 if available) */
         /* Note: each peer only has ONE active address (either IPv4 or IPv6) */
         n2n_sock_t *keepalive_addr = NULL;
@@ -1634,13 +1627,7 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
     }
 }
 
-/** Update the last_seen time for this peer, or get registered. */
-void check_peer( n2n_edge_t * eee,
-                 uint8_t from_supernode,
-                 const n2n_mac_t mac,
-                 const n2n_sock_t * peer,
-                 const char * version,
-                 const char * os_name );
+/** Forward declarations for P2P registration functions. */
 void try_send_register( n2n_edge_t * eee,
                         uint8_t from_supernode,
                         const n2n_mac_t mac,
@@ -1827,38 +1814,6 @@ void try_send_register_lan( n2n_edge_t * eee,
         traceEvent(TRACE_INFO, "LAN punch started for %s", macaddr_str(mac_tmp, mac));
     }
 }
-
-/** Update the last_seen time for this peer, or get registered. */
-void check_peer( n2n_edge_t * eee,
-                 uint8_t from_supernode,
-                 const n2n_mac_t mac,
-                 const n2n_sock_t * peer,
-                 const char * version,
-                 const char * os_name )
-{
-    struct peer_info * scan = find_peer_by_mac( eee->known_peers, mac );
-
-    if ( NULL == scan ) {
-        /* Create new peer entry with version/OS info */
-        scan = (struct peer_info*) calloc( 1, sizeof( struct peer_info ) );
-        if (!scan) return;
-        memcpy(scan->mac_addr, mac, N2N_MAC_SIZE);
-        /* Store address in correct slot based on family */
-        if (peer->family == AF_INET6) {
-            scan->sock6 = *peer;
-        } else {
-            scan->sock = *peer;
-        }
-        scan->assigned_ip = 0;
-        strncpy(scan->version, version ? version : "unknown", sizeof(scan->version) - 1);
-        strncpy(scan->os_name, os_name ? os_name : "unknown", sizeof(scan->os_name) - 1);
-        peer_list_add( &(eee->known_peers), scan );
-    } else {
-        /* Update existing peer */
-        update_peer_address( eee, from_supernode, mac, peer, n2n_now() );
-    }
-}
-
 
 /* Move the peer from the pending_peers list to the known_peers lists.
  *
