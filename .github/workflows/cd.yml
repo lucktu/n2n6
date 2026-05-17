@@ -27,26 +27,26 @@ jobs:
             os: windows-latest
             ARCH: x64
             MSVC_ARCH: x64
-          - target: x86_64-pc-windows
-            os: windows-latest
-            ARCH: x64
-            MSVC_ARCH: x64
+#          - target: x86_64-pc-windows
+#            os: windows-latest
+#            ARCH: x64
+#            MSVC_ARCH: x64
 
-          - target: i686-pc-windows_static
-            os: windows-latest
-            ARCH: x86
-            MSVC_ARCH: x86
-          - target: i686-pc-windows
-            os: windows-latest
-            ARCH: x86
-            MSVC_ARCH: x86
+#          - target: i686-pc-windows_static
+#            os: windows-latest
+#            ARCH: x86
+#            MSVC_ARCH: x86
+#          - target: i686-pc-windows
+#            os: windows-latest
+#            ARCH: x86
+#            MSVC_ARCH: x86
 
-          - target: aarch64-linux-musl_static
-            os: ubuntu-latest
-            URL: aarch64-linux-musl
-          - target: aarch64-linux-musl
-            os: ubuntu-latest
-            URL: aarch64-linux-musl
+#          - target: aarch64-linux-musl_static
+#            os: ubuntu-latest
+#            URL: aarch64-linux-musl
+#          - target: aarch64-linux-musl
+#            os: ubuntu-latest
+#            URL: aarch64-linux-musl
 
           - target: x86_64-linux-musl_static
             os: ubuntu-latest
@@ -55,40 +55,40 @@ jobs:
             os: ubuntu-latest
             URL: x86_64-linux-musl
 
-          - target: i686-linux-musl_static
-            os: ubuntu-latest
-            URL: i686-linux-musl
-          - target: i686-linux-musl
-            os: ubuntu-latest
-            URL: i686-linux-musl
-
-          - target: armv7-linux-musleabihf_static
-            os: ubuntu-latest
-            URL: armv7l-linux-musleabihf
-          - target: armv7-linux-musleabihf
-            os: ubuntu-latest
-            URL: armv7l-linux-musleabihf
-
-          - target: armv7-linux-musleabi_static
-            os: ubuntu-latest
-            URL: armv7m-linux-musleabi
-          - target: armv7-linux-musleabi
-            os: ubuntu-latest
-            URL: armv7m-linux-musleabi
-
-          - target: arm-linux-musleabihf_static
-            os: ubuntu-latest
-            URL: arm-linux-musleabihf
-          - target: arm-linux-musleabihf
-            os: ubuntu-latest
-            URL: arm-linux-musleabihf
-
-          - target: arm-linux-musleabi_static
-            os: ubuntu-latest
-            URL: arm-linux-musleabi
-          - target: arm-linux-musleabi
-            os: ubuntu-latest
-            URL: arm-linux-musleabi
+#          - target: i686-linux-musl_static
+#            os: ubuntu-latest
+#            URL: i686-linux-musl
+#          - target: i686-linux-musl
+#            os: ubuntu-latest
+#            URL: i686-linux-musl
+#
+#          - target: armv7-linux-musleabihf_static
+#            os: ubuntu-latest
+#            URL: armv7l-linux-musleabihf
+#          - target: armv7-linux-musleabihf
+#            os: ubuntu-latest
+#            URL: armv7l-linux-musleabihf
+#
+#          - target: armv7-linux-musleabi_static
+#            os: ubuntu-latest
+#            URL: armv7m-linux-musleabi
+#          - target: armv7-linux-musleabi
+#            os: ubuntu-latest
+#            URL: armv7m-linux-musleabi
+#
+#          - target: arm-linux-musleabihf_static
+#            os: ubuntu-latest
+#            URL: arm-linux-musleabihf
+#          - target: arm-linux-musleabihf
+#            os: ubuntu-latest
+#            URL: arm-linux-musleabihf
+#
+#          - target: arm-linux-musleabi_static
+#            os: ubuntu-latest
+#            URL: arm-linux-musleabi
+#          - target: arm-linux-musleabi
+#            os: ubuntu-latest
+#            URL: arm-linux-musleabi
 
           - target: mipsel-linux-musl_static
             os: ubuntu-latest
@@ -97,12 +97,12 @@ jobs:
             os: ubuntu-latest
             URL: mipsel-linux-muslsf
 
-          - target: mips-linux-musl_static
-            os: ubuntu-latest
-            URL: mips-linux-muslsf
-          - target: mips-linux-musl
-            os: ubuntu-latest
-            URL: mips-linux-muslsf
+#          - target: mips-linux-musl_static
+#            os: ubuntu-latest
+#            URL: mips-linux-muslsf
+#          - target: mips-linux-musl
+#            os: ubuntu-latest
+#            URL: mips-linux-muslsf
 
     runs-on: ${{ matrix.os }}
     env:
