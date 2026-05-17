@@ -1680,6 +1680,19 @@ void try_send_register( n2n_edge_t * eee,
         macstr_t mac_buf;
         n2n_sock_str_t sockbuf;
 
+        /* Check if already in known_peers - don't create duplicate */
+        struct peer_info *known = find_peer_by_mac(eee->known_peers, mac);
+        if (known) {
+            n2n_sock_t *target_sock = (peer->family == AF_INET6) ? &known->sock6 : &known->sock;
+            if (sock_equal(target_sock, peer) != 0) {
+                *target_sock = *peer;
+                known->last_seen = n2n_now();
+            } else {
+                known->last_seen = n2n_now();
+            }
+            return;
+        }
+
         scan = (struct peer_info*) calloc( 1, sizeof( struct peer_info ) );
         if (!scan) return;
 
