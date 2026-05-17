@@ -650,6 +650,10 @@ static int update_edge( n2n_sn_t * sss,
         /* Not known */
 
         scan = (struct peer_info*)calloc(1, sizeof(struct peer_info)); /* deallocated in purge_expired_registrations */
+        if (!scan) {
+            traceEvent(TRACE_ERROR, "update_edge: out of memory for new edge");
+            return 0;
+        }
 
         if (request_ip) {
             uint32_t assigned_ip;
@@ -807,26 +811,39 @@ static int update_edge( n2n_sn_t * sss,
                     existing_family = AF_INET6;
             }
 
-            /* Alt-family registration: update address and switch primary family.
-             * This handles both dual-stack registration and restart-on-different-family. */
+            /* Alt-family registration: update address.
+             * Only switch connect_family if old family stale (restart case).
+             * In dual-stack both registrations arrive within same cycle (<5s). */
             if (existing_family != 0 && sender_sock->family != existing_family) {
                 if (sender_sock->family == AF_INET6) {
                     int had_sock6 = (scan->sock6.family == AF_INET6);
                     memcpy(&scan->sock6, sender_sock, sizeof(n2n_sock_t));
-                    scan->connect_family = AF_INET6;
+                    if (now - scan->last_seen >= 5) {
+                        scan->connect_family = AF_INET6;
+                    }
                     scan->num_sockets = 0;
-                    scan->sockets[scan->num_sockets++] = scan->sock6;
+                    if (scan->sock.family == AF_INET) {
+                        scan->sockets[scan->num_sockets++] = scan->sock;
+                    } else {
+                        scan->sockets[scan->num_sockets++] = scan->sock6;
+                    }
                     if (local_sock_ena && local_sock) {
                         scan->sockets[scan->num_sockets++] = *local_sock;
                     }
                     scan->last_seen = now;
                     return had_sock6 ? 0 : 1;
                 }
-                /* IPv4 alt: primary was IPv6, switch to IPv4 */
+                /* IPv4 alt: primary was IPv6, switch only if stale */
                 memcpy(&scan->sock, sender_sock, sizeof(n2n_sock_t));
-                scan->connect_family = AF_INET;
+                if (now - scan->last_seen >= 5) {
+                    scan->connect_family = AF_INET;
+                }
                 scan->num_sockets = 0;
-                scan->sockets[scan->num_sockets++] = scan->sock;
+                if (scan->sock.family == AF_INET) {
+                    scan->sockets[scan->num_sockets++] = scan->sock;
+                } else {
+                    scan->sockets[scan->num_sockets++] = scan->sock6;
+                }
                 if (local_sock_ena && local_sock) {
                     scan->sockets[scan->num_sockets++] = *local_sock;
                 }
