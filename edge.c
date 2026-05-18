@@ -496,7 +496,7 @@ static int setup_encryption(n2n_edge_t *eee, int encrypt_mode, const char *encry
     
     if (encrypt_mode == 2) {
         if (!encrypt_key) {
-            traceEvent(TRACE_WARNING, "No encryption key provided, falling back to no encryption");
+            traceEvent(TRACE_WARNING, "No encryption key, data is not encrypted");
             eee->null_transop = 1;
             return 0;
         }
@@ -636,7 +636,7 @@ static int setup_mgmt_socket(n2n_edge_t *eee, int mgmt_port, const char *mgmt_pa
     eee->mgmt_sock = open_socket(mgmt_port, 0 /* bind LOOPBACK*/);
     if (eee->mgmt_sock == -1) {
         if (mgmt_port == N2N_EDGE_MGMT_PORT) {
-            traceEvent(TRACE_WARNING, "Management socket %u already in use, running without management interface",
+            traceEvent(TRACE_WARNING, "Mgmt port %u busy, running without it",
                        (unsigned int)mgmt_port);
             eee->mgmt_sock = -1;
         } else {
@@ -1607,6 +1607,8 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                     eee->pending_peers     = scan;
                     scan->punch_start_time = 0;
                     scan->punch_failed     = 0;
+                    scan->punch_retry_count = 0;
+                    scan->punch_reset_time = 0;
                     scan->keepalive_fails  = 0;
                     scan->last_probe_sent  = 0;
                     scan->lan_punch_start  = 0;
@@ -1711,6 +1713,8 @@ void try_send_register( n2n_edge_t * eee,
             scan->punch_start_time = 0;
             scan->punch_failed = 0;
             scan->register_retry_count = 0;
+            scan->punch_retry_count = 0;
+            scan->punch_reset_time = 0;
             scan->lan_punch_start = 0;
             scan->lan_punch_done = 0;
             scan->psp_logged = 0;
@@ -2566,6 +2570,8 @@ static int handle_PACKET( n2n_edge_t * eee,
                 eee->pending_peers = s;
                 s->punch_failed = 0;
                 s->punch_start_time = 0;
+                s->punch_retry_count = 0;
+                s->punch_reset_time = 0;
                 s->lan_punch_done = 0;
                 s->lan_punch_start = 0;
                 s->direct_seen = 0;
@@ -3206,16 +3212,18 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
             if (!do_punch) {
                 if (known) {
                     int addr_changed = 0;
-                    if (pi.sockets[0].family == AF_INET && known->sock.family == AF_INET) {
-                        if (sock_equal(&known->sock, &pi.sockets[0]) != 0) {
-                            addr_changed = 1;
+                    if (known->direct_seen == 0 || (now - known->direct_seen) >= 15) {
+                        if (pi.sockets[0].family == AF_INET) {
+                            if (known->sock.family != AF_INET ||
+                                sock_equal(&known->sock, &pi.sockets[0]) != 0) {
+                                addr_changed = 1;
+                            }
                         }
-                    }
-                    if (!addr_changed &&
-                        (pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6 &&
-                        known->sock6.family == AF_INET6) {
-                        if (sock_equal(&known->sock6, &pi.sock6) != 0) {
-                            addr_changed = 1;
+                        if (!addr_changed && pi.sock6.family == AF_INET6) {
+                            if (known->sock6.family != AF_INET6 ||
+                                sock_equal(&known->sock6, &pi.sock6) != 0) {
+                                addr_changed = 1;
+                            }
                         }
                     }
 
@@ -3399,6 +3407,10 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                                     traceEvent(TRACE_NORMAL, "TAP interface configured with IP %s/%u",
                                                assigned_ip_str, eee->device.ip_prefixlen);
                             }
+                        } else if (!default_ip_assignment && ra.dev_addr.net_addr == 0) {
+                            traceEvent(TRACE_ERROR, "%s is already in use, exiting",
+                                       inet_ntoa(*(struct in_addr*)&eee->device.ip_addr));
+                            exit(1);
                         }
 
                         /* Set sn_caps before daemonize so the log line is visible on terminal */
@@ -3425,7 +3437,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                                 caps_str = "unknown (old supernode)";
                             traceEvent(TRACE_NORMAL, "Supernode support: %s", caps_str);
                             traceEvent(TRACE_NORMAL, "[OK] edge <<< ======= %s ======= >>> supernode",
-                                       eee->supernode.family == AF_INET6 ? "IPv6" : "IPv4");
+                                       sender.family == AF_INET6 ? "IPv6" : "IPv4");
                             first_ok_message_shown = 1;
                         } else {
                             traceEvent(TRACE_DEBUG, "[OK] edge <<< ======= %s ======= >>> supernode",
@@ -4205,6 +4217,10 @@ static int scan_route(char* optarg, struct tuntap_config* tuntap_config) {
     if (!tuntap_config->routes)
     {
         tuntap_config->routes = (route*) calloc(16, sizeof(route));
+        if (!tuntap_config->routes) {
+            traceEvent(TRACE_ERROR, "Out of memory for routes");
+            return 0;
+        }
     }
     else if ((tuntap_config->routes_count % 16) == 15)
     {
@@ -4846,12 +4862,16 @@ cleanup:
 #endif
 
     send_deregister( eee, &(eee->supernode));
+    if (eee->supernode_alt.family != 0) {
+        send_deregister( eee, &(eee->supernode_alt));
+    }
 
     /* Notify all known peers */
     {
         struct peer_info *p = eee->known_peers;
         while (p) {
-            send_deregister(eee, &(p->sock));
+            if (p->sock.family != 0)  send_deregister(eee, &(p->sock));
+            if (p->sock6.family != 0) send_deregister(eee, &(p->sock6));
             p = p->next;
         }
     }

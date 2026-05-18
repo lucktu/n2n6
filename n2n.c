@@ -380,21 +380,9 @@ void peer_list_add(struct peer_info * * list,
 
 
 size_t purge_expired_registrations( struct peer_info ** peer_list ) {
-    static time_t last_purge = 0;
     time_t now = time(NULL);
-    size_t num_reg = 0;
 
-    if ((now - last_purge) < PURGE_REGISTRATION_FREQUENCY)
-        return 0;
-
-    traceEvent(TRACE_DEBUG, "Purging old registrations");
-
-    num_reg = purge_peer_list( peer_list, now-REGISTRATION_TIMEOUT );
-
-    last_purge = now;
-    traceEvent(TRACE_DEBUG, "Remove %ld registrations", num_reg);
-
-    return num_reg;
+    return purge_peer_list( peer_list, now-REGISTRATION_TIMEOUT );
 }
 
 /** Purge old items from the peer_list and return the number of items that were removed. */

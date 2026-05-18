@@ -208,7 +208,7 @@ struct tuntap_config {
  * same value if they are to understand each other. */
 #define N2N_COMPRESSION_ENABLED 1
 
-#define DEFAULT_MTU   1400
+#define DEFAULT_MTU   1350
 
 /** Common type used to hold stringified IP addresses. */
 typedef char ipstr_t[INET6_ADDRSTRLEN];
