@@ -251,6 +251,9 @@ static int readConfFile(const char * filename, char * const linebuffer) {
         p = strchr(buffer, '\n');
         if (p) *p ='\0';
 
+        p = strchr(buffer, '\r');
+        if (p) *p ='\0';
+
         if (strlen(buffer) == 0) continue;
 
         p = buffer;
@@ -266,7 +269,7 @@ static int readConfFile(const char * filename, char * const linebuffer) {
         }
 
         size_t buf_len = strlen(buffer);
-        while(buf_len > 0 && buffer[buf_len-1] == ' ') {
+        while(buf_len > 0 && (buffer[buf_len-1] == ' ' || buffer[buf_len-1] == '\r')) {
             buffer[buf_len-1] = '\0';
             buf_len--;
         }

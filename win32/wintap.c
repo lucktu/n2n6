@@ -135,8 +135,7 @@ static uint32_t set_static_routes(struct tuntap_dev* device) {
         route.ValidLifetime = 0xffffffff;
         route.PreferredLifetime = 0xffffffff;
 
-        rc &= CreateIpForwardEntry2(&route);
-            return rc;
+        rc |= CreateIpForwardEntry2(&route);
     }
 
     return rc;
