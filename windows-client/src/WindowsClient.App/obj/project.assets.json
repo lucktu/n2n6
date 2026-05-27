@@ -1,0 +1,119 @@
+{
+  "version": 3,
+  "targets": {
+    "net8.0-windows7.0": {
+      "WindowsClient.Core/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "compile": {
+          "bin/placeholder/WindowsClient.Core.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/WindowsClient.Core.dll": {}
+        }
+      },
+      "WindowsClient.Infrastructure/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "dependencies": {
+          "WindowsClient.Core": "1.0.0"
+        },
+        "compile": {
+          "bin/placeholder/WindowsClient.Infrastructure.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/WindowsClient.Infrastructure.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "WindowsClient.Core/1.0.0": {
+      "type": "project",
+      "path": "../WindowsClient.Core/WindowsClient.Core.csproj",
+      "msbuildProject": "../WindowsClient.Core/WindowsClient.Core.csproj"
+    },
+    "WindowsClient.Infrastructure/1.0.0": {
+      "type": "project",
+      "path": "../WindowsClient.Infrastructure/WindowsClient.Infrastructure.csproj",
+      "msbuildProject": "../WindowsClient.Infrastructure/WindowsClient.Infrastructure.csproj"
+    }
+  },
+  "projectFileDependencyGroups": {
+    "net8.0-windows7.0": [
+      "WindowsClient.Core >= 1.0.0",
+      "WindowsClient.Infrastructure >= 1.0.0"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\AI\\.nuget\\packages\\": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\WindowsClient.App.csproj",
+      "projectName": "WindowsClient.App",
+      "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\WindowsClient.App.csproj",
+      "packagesPath": "C:\\Users\\AI\\.nuget\\packages\\",
+      "outputPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\obj\\",
+      "projectStyle": "PackageReference",
+      "configFilePaths": [
+        "C:\\Users\\AI\\AppData\\Roaming\\NuGet\\NuGet.Config"
+      ],
+      "originalTargetFrameworks": [
+        "net8.0-windows"
+      ],
+      "sources": {
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net8.0-windows7.0": {
+          "targetAlias": "net8.0-windows",
+          "projectReferences": {
+            "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj": {
+              "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj"
+            },
+            "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj": {
+              "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj"
+            }
+          }
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      }
+    },
+    "frameworks": {
+      "net8.0-windows7.0": {
+        "targetAlias": "net8.0-windows",
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "frameworkReferences": {
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          },
+          "Microsoft.WindowsDesktop.App": {
+            "privateAssets": "none"
+          }
+        },
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.421/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}

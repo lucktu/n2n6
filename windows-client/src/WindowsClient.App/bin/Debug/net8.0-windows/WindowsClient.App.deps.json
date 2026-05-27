@@ -1,0 +1,56 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "WindowsClient.App/1.0.0": {
+        "dependencies": {
+          "WindowsClient.Core": "1.0.0",
+          "WindowsClient.Infrastructure": "1.0.0"
+        },
+        "runtime": {
+          "WindowsClient.App.dll": {}
+        }
+      },
+      "WindowsClient.Core/1.0.0": {
+        "runtime": {
+          "WindowsClient.Core.dll": {
+            "assemblyVersion": "1.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
+      "WindowsClient.Infrastructure/1.0.0": {
+        "dependencies": {
+          "WindowsClient.Core": "1.0.0"
+        },
+        "runtime": {
+          "WindowsClient.Infrastructure.dll": {
+            "assemblyVersion": "1.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "WindowsClient.App/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "WindowsClient.Core/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "WindowsClient.Infrastructure/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

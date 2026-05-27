@@ -1,0 +1,94 @@
+{
+  "version": 3,
+  "targets": {
+    "net8.0": {
+      "WindowsClient.Core/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "compile": {
+          "bin/placeholder/WindowsClient.Core.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/WindowsClient.Core.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "WindowsClient.Core/1.0.0": {
+      "type": "project",
+      "path": "../WindowsClient.Core/WindowsClient.Core.csproj",
+      "msbuildProject": "../WindowsClient.Core/WindowsClient.Core.csproj"
+    }
+  },
+  "projectFileDependencyGroups": {
+    "net8.0": [
+      "WindowsClient.Core >= 1.0.0"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\AI\\.nuget\\packages\\": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj",
+      "projectName": "WindowsClient.Infrastructure",
+      "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj",
+      "packagesPath": "C:\\Users\\AI\\.nuget\\packages\\",
+      "outputPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\obj\\",
+      "projectStyle": "PackageReference",
+      "configFilePaths": [
+        "C:\\Users\\AI\\AppData\\Roaming\\NuGet\\NuGet.Config"
+      ],
+      "originalTargetFrameworks": [
+        "net8.0"
+      ],
+      "sources": {
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "projectReferences": {
+            "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj": {
+              "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj"
+            }
+          }
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      }
+    },
+    "frameworks": {
+      "net8.0": {
+        "targetAlias": "net8.0",
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "frameworkReferences": {
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          }
+        },
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.421/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}

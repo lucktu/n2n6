@@ -1,0 +1,12 @@
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\bin\Debug\net8.0\WindowsClient.Core.deps.json
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\bin\Debug\net8.0\WindowsClient.Core.dll
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\bin\Debug\net8.0\WindowsClient.Core.pdb
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\WindowsClient.Core.GeneratedMSBuildEditorConfig.editorconfig
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\WindowsClient.Core.AssemblyInfoInputs.cache
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\WindowsClient.Core.AssemblyInfo.cs
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\WindowsClient.Core.csproj.CoreCompileInputs.cache
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\WindowsClient.Core.sourcelink.json
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\WindowsClient.Core.dll
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\refint\WindowsClient.Core.dll
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\WindowsClient.Core.pdb
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Core\obj\Debug\net8.0\ref\WindowsClient.Core.dll

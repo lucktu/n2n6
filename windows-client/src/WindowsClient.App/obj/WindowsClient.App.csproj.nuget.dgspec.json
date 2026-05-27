@@ -1,0 +1,196 @@
+{
+  "format": 1,
+  "restore": {
+    "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\WindowsClient.App.csproj": {}
+  },
+  "projects": {
+    "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\WindowsClient.App.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\WindowsClient.App.csproj",
+        "projectName": "WindowsClient.App",
+        "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\WindowsClient.App.csproj",
+        "packagesPath": "C:\\Users\\AI\\.nuget\\packages\\",
+        "outputPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.App\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\AI\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0-windows"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0-windows7.0": {
+            "targetAlias": "net8.0-windows",
+            "projectReferences": {
+              "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj": {
+                "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj"
+              },
+              "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj": {
+                "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj"
+              }
+            }
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        }
+      },
+      "frameworks": {
+        "net8.0-windows7.0": {
+          "targetAlias": "net8.0-windows",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            },
+            "Microsoft.WindowsDesktop.App": {
+              "privateAssets": "none"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.421/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    },
+    "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj",
+        "projectName": "WindowsClient.Core",
+        "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj",
+        "packagesPath": "C:\\Users\\AI\\.nuget\\packages\\",
+        "outputPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\AI\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.421/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    },
+    "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj",
+        "projectName": "WindowsClient.Infrastructure",
+        "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\WindowsClient.Infrastructure.csproj",
+        "packagesPath": "C:\\Users\\AI\\.nuget\\packages\\",
+        "outputPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Infrastructure\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\AI\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {
+              "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj": {
+                "projectPath": "D:\\3.env\\n2n\\code\\ipv4+ipv6\\n2n6\\windows-client\\src\\WindowsClient.Core\\WindowsClient.Core.csproj"
+              }
+            }
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.421/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

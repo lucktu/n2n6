@@ -1,0 +1,16 @@
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\bin\Debug\net8.0\WindowsClient.Infrastructure.deps.json
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\bin\Debug\net8.0\WindowsClient.Infrastructure.dll
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\bin\Debug\net8.0\WindowsClient.Infrastructure.pdb
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\bin\Debug\net8.0\WindowsClient.Core.dll
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\bin\Debug\net8.0\WindowsClient.Core.pdb
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.csproj.AssemblyReference.cache
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.GeneratedMSBuildEditorConfig.editorconfig
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.AssemblyInfoInputs.cache
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.AssemblyInfo.cs
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.csproj.CoreCompileInputs.cache
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.sourcelink.json
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsC.FD23D052.Up2Date
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.dll
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\refint\WindowsClient.Infrastructure.dll
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\WindowsClient.Infrastructure.pdb
+D:\3.env\n2n\code\ipv4+ipv6\n2n6\windows-client\src\WindowsClient.Infrastructure\obj\Debug\net8.0\ref\WindowsClient.Infrastructure.dll
