@@ -28,6 +28,7 @@
 #include "speck.h"
 #include "pearson.h"
 #include "assert.h"
+#include <fcntl.h>
 #include "minilzo.h"
 #include "random.h"
 #include "string.h"
@@ -193,9 +194,15 @@ struct n2n_edge
     size_t              rx_p2p;
     size_t              tx_sup;
     size_t              rx_sup;
+
 #ifdef _WIN32
     volatile int        keep_running;           /**< Set to 0 to stop tunReadThread */
 #endif
+
+    /* Rate-limiting for P2P/PsP log messages: remember last printed peer + address */
+    uint8_t             last_p2p_log_mac[N2N_MAC_SIZE];  /* MAC of last P2P direct log */
+    n2n_sock_t          last_p2p_log_addr;               /* address of last P2P direct log */
+    uint8_t             last_psp_log_mac[N2N_MAC_SIZE];  /* MAC of last PsP relay log */
 };
 
 #ifdef _WIN32
@@ -790,9 +797,8 @@ static void help() {
     printf("\n");
 }
 
-
 /** Send a datagram to a socket defined by a n2n_sock_t */
-static ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t * dest )
+ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t * dest )
 {
     struct sockaddr_in6 peer_addr;
     ssize_t sent;
@@ -828,12 +834,11 @@ static ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_s
 }
 
 /** Select the correct UDP socket based on destination address family */
-static inline SOCKET sock_for_dest( const n2n_edge_t * eee, const n2n_sock_t * dest )
+SOCKET sock_for_dest( const n2n_edge_t * eee, const n2n_sock_t * dest )
 {
     if (dest->family == AF_INET6 && eee->udp_sock6 != -1) return eee->udp_sock6;
     return eee->udp_sock;
 }
-
 
 /** Send a REGISTER packet to another edge.
  *  If temp_local_sock is provided, use it instead of eee->local_sock in the packet. */
@@ -1410,10 +1415,10 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
         {
             scan->punch_failed = 1;
             scan->punch_reset_time = now;
-            if (!scan->psp_logged) {
+            if (memcmp(scan->mac_addr, eee->last_psp_log_mac, N2N_MAC_SIZE)) {
                 traceEvent(TRACE_NORMAL, "PsP (supernode relay) for %s",
                            PEER_ID(mac_tmp, scan));
-                scan->psp_logged = 1;
+                memcpy(eee->last_psp_log_mac, scan->mac_addr, N2N_MAC_SIZE);
             }
         } else if ( scan->punch_start_time != 0 &&
                     !scan->punch_failed &&
@@ -1533,14 +1538,19 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
     struct peer_info *prev = NULL;
     MACSTR_TMP(mac_tmp);
 
-    /* Skip keepalive entirely if there's recent direct P2P communication */
-    if (eee->last_p2p > 0 && (now - eee->last_p2p) < KEEPALIVE_IDLE_SECONDS) return;
-    /* Also skip if there's recent relay (supernode) communication */
-    if (eee->last_sup > 0 && (now - eee->last_sup) < KEEPALIVE_IDLE_SECONDS) return;
+    /* Per-peer keepalive: each peer is checked individually based on its own
+     * last_seen time. A peer actively receiving traffic will not receive probes. */
 
     while ( scan ) {
         struct peer_info *next = scan->next;
         time_t idle = now - scan->last_seen;
+
+        /* Skip keepalive if this peer has received any traffic recently */
+        if (idle < KEEPALIVE_IDLE_SECONDS) {
+            prev = scan;
+            scan = next;
+            continue;
+        }
 
         /* Determine which address to use for keepalive (prefer IPv4 if available) */
         /* Note: each peer only has ONE active address (either IPv4 or IPv6) */
@@ -1876,12 +1886,15 @@ void set_peer_operational( n2n_edge_t * eee,
         scan->register_retry_count = 0;
         scan->psp_logged = 0;
 
-        if (!scan->p2p_logged) {
+        if (memcmp(scan->mac_addr, eee->last_p2p_log_mac, N2N_MAC_SIZE) ||
+            memcmp(peer, &eee->last_p2p_log_addr, sizeof(n2n_sock_t))) {
+            /* New P2P connection or address changed — log it */
             char mac_buf[18];
             n2n_sock_str_t sockbuf;
             traceEvent( TRACE_NORMAL, "P2P direct with %s at %s",
                         PEER_ID(mac_buf, scan), sock_to_cstr( sockbuf, peer ) );
-            scan->p2p_logged = 1;
+            memcpy(eee->last_p2p_log_mac, scan->mac_addr, N2N_MAC_SIZE);
+            memcpy(&eee->last_p2p_log_addr, peer, sizeof(n2n_sock_t));
         }
 
         /* Send REGISTER back to confirm our new address to the peer */
@@ -2162,7 +2175,7 @@ static int find_peer_destination(n2n_edge_t * eee,
            !scan->punch_failed &&
            (memcmp(mac_address, scan->mac_addr, N2N_MAC_SIZE) == 0))
         {
-            /* If never had direct P2P communication, use relay (中转保底) */
+            /* If never had direct P2P communication, use relay */
             if (scan->direct_seen == 0) {
                 traceEvent(TRACE_DEBUG, "find_peer_destination: no direct_seen yet, using relay");
                 break;
@@ -2538,7 +2551,7 @@ static int handle_PACKET( n2n_edge_t * eee,
     } else {
         /* Relayed packet from known peer.
          * Check if sender's address changed - if so, move to pending
-         * for re-punch (中转保底: relay now, re-punch in background). */
+         * for re-punch (relay now, re-punch in background). */
         int addr_changed = 0;
         if (orig_sender->family == AF_INET) {
             if (scan->sock.family == AF_INET) {
@@ -2558,29 +2571,41 @@ static int handle_PACKET( n2n_edge_t * eee,
 
         if (addr_changed) {
             macstr_t mac_buf2;
-            traceEvent(TRACE_INFO, "Relayed packet: %s addr changed, move to pending for re-punch",
-                       macaddr_str(mac_buf2, pkt->srcMac));
+            /* Only trigger re-punch for peers that are actively communicating.
+             * If this peer hasn't been seen recently, ignore the address change
+             * and let it be discovered naturally when communication resumes. */
+            time_t last_active = scan->last_seen;
+            if (scan->direct_seen > last_active) last_active = scan->direct_seen;
+            int actively_communicating = ((now - last_active) < (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_RETRY_INTERVAL));
 
-            struct peer_info *prev = NULL, *s = eee->known_peers;
-            while (s && s != scan) { prev = s; s = s->next; }
-            if (s) {
-                if (prev) prev->next = s->next;
-                else eee->known_peers = s->next;
-                s->next = eee->pending_peers;
-                eee->pending_peers = s;
-                s->punch_failed = 0;
-                s->punch_start_time = 0;
-                s->punch_retry_count = 0;
-                s->punch_reset_time = 0;
-                s->lan_punch_done = 0;
-                s->lan_punch_start = 0;
-                s->direct_seen = 0;
-                s->last_probe_sent = 0;
-                s->keepalive_fails = 0;
-                s->register_retry_count = 0;
-                s->psp_logged = 0;
-                s->p2p_logged = 0;
-                start_punch(eee, s);
+            if (actively_communicating) {
+                traceEvent(TRACE_INFO, "Relayed packet: %s addr changed, move to pending for re-punch",
+                           macaddr_str(mac_buf2, pkt->srcMac));
+
+                struct peer_info *prev = NULL, *s = eee->known_peers;
+                while (s && s != scan) { prev = s; s = s->next; }
+                if (s) {
+                    if (prev) prev->next = s->next;
+                    else eee->known_peers = s->next;
+                    s->next = eee->pending_peers;
+                    eee->pending_peers = s;
+                    s->punch_failed = 0;
+                    s->punch_start_time = 0;
+                    s->punch_retry_count = 0;
+                    s->punch_reset_time = 0;
+                    s->lan_punch_done = 0;
+                    s->lan_punch_start = 0;
+                    s->direct_seen = 0;
+                    s->last_probe_sent = 0;
+                    s->keepalive_fails = 0;
+                    s->register_retry_count = 0;
+                    s->psp_logged = 0;
+                    s->p2p_logged = 0;
+                    start_punch(eee, s);
+                }
+            } else {
+                traceEvent(TRACE_INFO, "Relayed packet: %s addr changed but not actively communicating, ignoring",
+                           macaddr_str(mac_buf2, pkt->srcMac));
             }
         } else {
             scan->last_seen = now;
@@ -2703,14 +2728,14 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     }
 
     /* Handle commands */
-    if (recvlen >= 4) {
-        if (0 == memcmp(udp_buf, "stop", 4)) {
+    if (recvlen >= 2) {
+        if (recvlen >= 4 && 0 == memcmp(udp_buf, "stop", 4)) {
             traceEvent(TRACE_ERROR, "stop command received.");
             *keep_running = 0;
             return;
         }
 
-        if (0 == memcmp(udp_buf, "help", 4)) {
+        if (recvlen >= 4 && 0 == memcmp(udp_buf, "help", 4)) {
             msg_len = 0;
             msg_len += snprintf((char*)(udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
                                 "Help for edge management console:\n"
@@ -2723,6 +2748,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
                    (struct sockaddr*) &sender_sock, i);
             return;
         }
+
     }
 
     if (recvlen >= 5) {
@@ -2896,14 +2922,16 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
 
-    msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                       "transop %u,%u | super %u,%u | p2p %u,%u\n",
-                       (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].tx_cnt,
-                       (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].rx_cnt,
-                       (unsigned int)eee->tx_sup,
-                       (unsigned int)eee->rx_sup,
-                       (unsigned int)eee->tx_p2p,
-                       (unsigned int)eee->rx_p2p);
+    {
+        msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                           "transop %u,%u | super %u,%u | p2p %u,%u\n",
+                           (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].tx_cnt,
+                           (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].rx_cnt,
+                           (unsigned int)eee->tx_sup,
+                           (unsigned int)eee->rx_sup,
+                           (unsigned int)eee->tx_p2p,
+                           (unsigned int)eee->rx_p2p);
+    }
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
 
@@ -2924,7 +2952,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
     macstr_t            mac_buf1;
     macstr_t            mac_buf2;
 
-    uint8_t             udp_buf[N2N_PKT_BUF_SIZE];      /* Compete UDP packet */
+    uint8_t             udp_buf[N2N_PKT_BUF_SIZE];      /* Complete UDP packet */
     ssize_t             recvlen;
     size_t              rem;
     size_t              idx;
@@ -2938,7 +2966,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
     size_t              i;
 
     i = sizeof(sender_sock);
-    recvlen = recvfrom(fd, udp_buf, N2N_PKT_BUF_SIZE, 0/*flags*/,
+    recvlen = recvfrom(fd, udp_buf, sizeof(udp_buf), 0/*flags*/,
                       (struct sockaddr*) &sender_sock, (socklen_t*) &i);
 
     if ( recvlen < 0 )

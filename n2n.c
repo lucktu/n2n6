@@ -53,6 +53,15 @@ SOCKET open_socket(uint16_t local_port, int bind_any) {
     }
 #endif
 
+#ifdef _WIN32
+    /* Windows default UDP buffer is only 8KB, increase to 256KB for throughput */
+    {
+        int bufsize = 256 * 1024;
+        setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, (const char*)&bufsize, sizeof(bufsize));
+        setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, (const char*)&bufsize, sizeof(bufsize));
+    }
+#endif
+
     memset(&local_address, 0, sizeof(local_address));
     local_address.sin_family = AF_INET;
     local_address.sin_port = htons(local_port);
@@ -77,6 +86,12 @@ SOCKET open_socket(uint16_t local_port, int bind_any) {
 
 #ifndef _WIN32
     { int tos = 0x10; setsockopt(sock_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)); }
+    { 
+        int rcvbuf = 2 * 1024 * 1024;  /* 2MB */
+        if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            traceEvent(TRACE_DEBUG, "Failed to set SO_RCVBUF to %d: %s", rcvbuf, strerror(errno));
+        }
+    }
 #endif
 
     return sock_fd;
@@ -97,6 +112,15 @@ SOCKET open_socket6(uint16_t local_port, int bind_any) {
 #endif
 
     setsockopt(sock_fd, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&sockopt, sizeof(sockopt));
+
+#ifdef _WIN32
+    /* Windows default UDP buffer is only 8KB, increase to 256KB for throughput */
+    {
+        int bufsize = 256 * 1024;
+        setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, (const char*)&bufsize, sizeof(bufsize));
+        setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, (const char*)&bufsize, sizeof(bufsize));
+    }
+#endif
 
     memset(&local_address, 0, sizeof(local_address));
     local_address.sin6_family = AF_INET6;

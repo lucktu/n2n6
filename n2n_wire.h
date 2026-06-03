@@ -28,7 +28,7 @@
 #define N2N_COMMUNITY_SIZE              16
 #define N2N_MAC_SIZE                    6
 #define N2N_COOKIE_SIZE                 4
-#define N2N_PKT_BUF_SIZE                2048    /* Peer capacity on edge */
+#define N2N_PKT_BUF_SIZE                4096    /* Peer capacity on edge */
 #define N2N_SN_PKTBUF_SIZE              2048    /* Peer capacity on supernode */
 #define N2N_SOCKBUF_SIZE                64      /* string representation of INET or INET6 sockets */
 
