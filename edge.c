@@ -813,11 +813,19 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
     {
 #ifdef _WIN32
         int error = WSAGetLastError();
-        /* 10014 = WSAEFAULT: IPv6 socket sending to IPv4 address - silent */
-        /* 10047 = WSAEAFNOSUPPORT: IPv4 socket sending to IPv6 address - silent */
-        if ( error != 10014 && error != 10047 ) {
+        /* WSAEFAULT: IPv6 socket sending to IPv4 address - silent */
+        /* WSAEAFNOSUPPORT: IPv4 socket sending to IPv6 address - silent */
+        /* Transient errors during network transition (e.g. WiFi switch) */
+         if ( error == WSAENETUNREACH ||
+              error == WSAECONNRESET  ||
+              error == WSAEHOSTUNREACH ) {
+             const char *why = (error == WSAENETUNREACH) ? "Network is unreachable" :
+                               (error == WSAECONNRESET)  ? "Connection was reset"   :
+                                                           "No route to host";
+             traceEvent( TRACE_WARNING, "sendto: %s (network change, harmless)", why );
+         } else if ( error != WSAEFAULT && error != WSAEAFNOSUPPORT ) {
             W32_ERROR(error, c)
-            traceEvent( TRACE_ERROR, "sendto failed (%d) %ls", error, c );
+            traceEvent( TRACE_ERROR, "sendto failed (%d) %ls", error, c ? c : L"" );
             W32_ERROR_FREE(c)
         }
 #else
