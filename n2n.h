@@ -250,7 +250,7 @@ struct peer_info {
     uint8_t             same_lan_as_sn;    /* 1 if edge is in same LAN as supernode */
 };
 
-struct n2n_edge; /* defined in edge.c */
+struct n2n_edge; /* forward declaration, defined below */
 typedef struct n2n_edge         n2n_edge_t;
 
 
@@ -332,5 +332,109 @@ size_t purge_expired_registrations( struct peer_info ** peer_list );
 
 /* version.c */
 extern char *n2n_sw_version, *n2n_sw_osName, *n2n_sw_buildDate;
+
+/* Full definition of struct n2n_edge - needed by bypass and edge internals */
+#include "n2n_transforms.h"
+#include "bypass.h"
+
+#define N2N_EDGE_SN_HOST_SIZE   48
+typedef char n2n_sn_name_t[N2N_EDGE_SN_HOST_SIZE];
+
+#define N2N_EDGE_NUM_SUPERNODES 3
+#define N2N_EDGE_SUP_ATTEMPTS   3
+
+#ifndef N2N_PATHNAME_MAXLEN
+#define N2N_PATHNAME_MAXLEN     256
+#endif
+
+/* Transop indices */
+#define N2N_TRANSOP_NULL_IDX    0
+#define N2N_TRANSOP_TF_IDX      1
+#define N2N_TRANSOP_AESCBC_IDX  2
+#define N2N_TRANSOP_CC20_IDX    3
+#define N2N_TRANSOP_SPECK_IDX   4
+
+struct n2n_edge
+{
+    int                 daemon;
+    uint8_t             re_resolve_supernode_ip;
+
+    n2n_sock_t          supernode;
+    n2n_sock_t          supernode_alt;
+
+    size_t              sn_idx;
+    size_t              sn_num;
+    n2n_sn_name_t       sn_ip_array[N2N_EDGE_NUM_SUPERNODES];
+    int                 sn_af;
+    int                 sn_wait;
+
+    n2n_community_t     community_name;
+    char                keyschedule[N2N_PATHNAME_MAXLEN];
+    int                 null_transop;
+    char                supernode_version[16];
+
+    SOCKET              udp_sock;
+    SOCKET              udp_sock6;
+    SOCKET              mgmt_sock;
+
+    tuntap_dev          device;
+    int                 dyn_ip_mode;
+    int                 allow_routing;
+    int                 drop_multicast;
+
+    n2n_trans_op_t      transop[N2N_MAX_TRANSFORMS];
+    size_t              tx_transop_idx;
+
+    struct peer_info *  known_peers;
+    struct peer_info *  pending_peers;
+#ifdef _WIN32
+    CRITICAL_SECTION    peers_lock;
+#endif
+    time_t              last_register_req;
+    size_t              register_lifetime;
+    time_t              last_p2p;
+    time_t              last_sup;
+    size_t              sup_attempts;
+    n2n_cookie_t        last_cookie;
+    uint8_t             sn_ack_count;
+    uint8_t             sn_ipv4_support;
+    uint8_t             sn_ipv6_support;
+
+    time_t              start_time;
+
+    n2n_sock_t          my_public_sock;
+
+    n2n_sock_t          local_sock;
+    int                 local_sock_ena;
+
+    n2n_sock_t          local_socks[3];
+    int                 local_socks_count;
+
+    /* UPnP/NAT-PMP */
+    uint16_t            upnp_mapped_port;
+
+    n2n_sock_t          last_resolved_supernode;
+    time_t              last_resolve_check;
+
+    /* Statistics */
+    size_t              tx_p2p;
+    size_t              rx_p2p;
+    size_t              tx_sup;
+    size_t              rx_sup;
+
+#ifdef _WIN32
+    volatile int        keep_running;
+#endif
+
+    /* Rate-limiting for P2P/PsP log messages */
+    uint8_t             last_p2p_log_mac[N2N_MAC_SIZE];
+    n2n_sock_t          last_p2p_log_addr;
+    uint8_t             last_psp_log_mac[N2N_MAC_SIZE];
+
+    /* Bypass module */
+    bypass_context_t   *bp;
+    uint16_t            bp_proxy_port;
+    uint8_t             bp_user_disabled; /* set by -x flag before bp is allocated */
+};
 
 #endif /* _N2N_H_ */

@@ -29,6 +29,7 @@ typedef struct transop_aes {
     n2n_aes_context_t *dec_ctx;
     n2n_aes_context_t *iv_enc_ctx;   /* AES128 context for IV encryption */
     uint8_t            iv_pad_val[TRANSOP_AES_IV_PADDING_SIZE];
+    uint8_t            assembly[N2N_TRANSFORM_BUF_SIZE]; /* heap-allocated to avoid large stack */
 } transop_aes_t;
 
 static int transop_deinit_aes(n2n_trans_op_t *arg) {
@@ -55,9 +56,8 @@ static ssize_t transop_encode_aes(n2n_trans_op_t *arg,
                                    const uint8_t *inbuf, size_t in_len,
                                    const uint8_t *peer_mac) {
     transop_aes_t *priv = (transop_aes_t *)arg->priv;
-    uint8_t assembly[N2N_PKT_BUF_SIZE] = {0};
 
-    if (in_len > N2N_PKT_BUF_SIZE || (in_len + TRANSOP_AES_PREAMBLE_SIZE) > out_len) return -1;
+    if (in_len > N2N_TRANSFORM_BUF_SIZE || (in_len + TRANSOP_AES_PREAMBLE_SIZE) > out_len) return -1;
 
     size_t idx = 0;
     uint8_t iv_seed[TRANSOP_AES_IV_SEED_SIZE];
@@ -67,12 +67,13 @@ static ssize_t transop_encode_aes(n2n_trans_op_t *arg,
     random_bytes_buf(iv_seed, TRANSOP_AES_IV_SEED_SIZE);
     encode_buf(outbuf, &idx, iv_seed, TRANSOP_AES_IV_SEED_SIZE);
 
-    memcpy(assembly, inbuf, in_len);
+    memset(priv->assembly, 0, N2N_TRANSFORM_BUF_SIZE);
+    memcpy(priv->assembly, inbuf, in_len);
     int len2 = ((in_len / N2N_AES_BLOCK_SIZE) + 1) * N2N_AES_BLOCK_SIZE;
-    assembly[len2 - 1] = len2 - in_len;
+    priv->assembly[len2 - 1] = len2 - in_len;
 
     set_aes_cbc_iv(priv, enc_ivec, iv_seed);
-    n2n_aes_cbc_encrypt(outbuf + TRANSOP_AES_PREAMBLE_SIZE, assembly, len2, enc_ivec, priv->enc_ctx);
+    n2n_aes_cbc_encrypt(outbuf + TRANSOP_AES_PREAMBLE_SIZE, priv->assembly, len2, enc_ivec, priv->enc_ctx);
 
     return len2 + TRANSOP_AES_PREAMBLE_SIZE;
 }
@@ -82,9 +83,8 @@ static ssize_t transop_decode_aes(n2n_trans_op_t *arg,
                                    const uint8_t *inbuf, size_t in_len,
                                    const uint8_t *peer_mac) {
     transop_aes_t *priv = (transop_aes_t *)arg->priv;
-    uint8_t assembly[N2N_PKT_BUF_SIZE];
 
-    if (in_len < TRANSOP_AES_PREAMBLE_SIZE || (in_len - TRANSOP_AES_PREAMBLE_SIZE) > N2N_PKT_BUF_SIZE) return 0;
+    if (in_len < TRANSOP_AES_PREAMBLE_SIZE || (in_len - TRANSOP_AES_PREAMBLE_SIZE) > N2N_TRANSFORM_BUF_SIZE) return 0;
 
     size_t rem = in_len, idx = 0;
     uint8_t aes_enc_ver = 0, iv_seed[TRANSOP_AES_IV_SEED_SIZE];
@@ -98,12 +98,12 @@ static ssize_t transop_decode_aes(n2n_trans_op_t *arg,
 
     n2n_aes_ivec_t dec_ivec = {0};
     set_aes_cbc_iv(priv, dec_ivec, iv_seed);
-    n2n_aes_cbc_decrypt(assembly, inbuf + TRANSOP_AES_PREAMBLE_SIZE, len, dec_ivec, priv->dec_ctx);
+    n2n_aes_cbc_decrypt(priv->assembly, inbuf + TRANSOP_AES_PREAMBLE_SIZE, len, dec_ivec, priv->dec_ctx);
 
-    uint8_t padding = assembly[len - 1] & 0xff;
+    uint8_t padding = priv->assembly[len - 1] & 0xff;
     if (len < (int)padding) return 0;
     len -= padding;
-    memcpy(outbuf, assembly, len);
+    memcpy(outbuf, priv->assembly, len);
     return len;
 }
 

@@ -256,7 +256,7 @@ void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
                 else
                     strncpy(theDate, "01/Jan/1970 00:00:00", N2N_TRACE_DATESIZE);
                 for(i=(int)strlen(file)-1; i>0; i--) if(file[i] == '/') { i++; break; };
-                snprintf(out_buf, sizeof(out_buf), "%s [%15s:%4d] %s%s", theDate, &file[i], line, extra_msg, buf);
+                snprintf(out_buf, sizeof(out_buf), "%s [%8s:%4d] %s%s", theDate, &file[i], line, extra_msg, buf);
             }
             printf("%s\n", out_buf);
             fflush(stdout);
@@ -266,7 +266,7 @@ void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
             /* running in the console */
             strftime(theDate, N2N_TRACE_DATESIZE, "%d/%b/%Y %H:%M:%S", localtime(&theTime));
             for(i=(int)strlen(file)-1; i>0; i--) if(file[i] == '\\') { i++; break; };
-            snprintf(out_buf, sizeof(out_buf), "%s [%15s:%4d] %s%s", theDate, &file[i], line, extra_msg, buf);
+            snprintf(out_buf, sizeof(out_buf), "%s [%8s:%4d] %s%s", theDate, &file[i], line, extra_msg, buf);
             printf("%s\n", out_buf);
             fflush(stdout);
         } else {

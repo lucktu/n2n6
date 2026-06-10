@@ -37,7 +37,7 @@ static ssize_t transop_encode_cc20(n2n_trans_op_t *arg,
                                 const uint8_t *peer_mac) {
     transop_cc20_t *priv = (transop_cc20_t *)arg->priv;
 
-    if (in_len > N2N_PKT_BUF_SIZE) { traceEvent(TRACE_ERROR, "encode_cc20 inbuf too big"); return -1; }
+    if (in_len > N2N_TRANSFORM_BUF_SIZE) { traceEvent(TRACE_ERROR, "encode_cc20 inbuf too big"); return -1; }
     if ((in_len + TRANSOP_CC20_PREAMBLE_SIZE) > out_len) { traceEvent(TRACE_ERROR, "encode_cc20 outbuf too small"); return -1; }
 
     size_t idx = 0;
@@ -60,7 +60,7 @@ static ssize_t transop_decode_cc20(n2n_trans_op_t *arg,
                                 const uint8_t *peer_mac) {
     transop_cc20_t *priv = (transop_cc20_t *)arg->priv;
 
-    if (in_len < TRANSOP_CC20_PREAMBLE_SIZE || (in_len - TRANSOP_CC20_PREAMBLE_SIZE) > N2N_PKT_BUF_SIZE) {
+    if (in_len < TRANSOP_CC20_PREAMBLE_SIZE || (in_len - TRANSOP_CC20_PREAMBLE_SIZE) > N2N_TRANSFORM_BUF_SIZE) {
         traceEvent(TRACE_ERROR, "decode_cc20 wrong size %zu", in_len); return 0;
     }
 

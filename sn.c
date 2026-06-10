@@ -29,11 +29,7 @@
 #define N2N_SN_LPORT_DEFAULT SUPERNODE_PORT
 #define N2N_SN_MGMT_PORT     5646
 
-/* Transform indices - same as edge.c */
-#define N2N_TRANSOP_NULL_IDX    0
-#define N2N_TRANSOP_TF_IDX      1
-#define N2N_TRANSOP_AESCBC_IDX  2
-#define N2N_TRANSOP_SPECK_IDX   3
+/* Transform indices - defined in n2n.h */
 
 #ifndef _WIN32
 #include <poll.h>
@@ -575,6 +571,7 @@ static int init_sn( n2n_sn_t * sss )
     transop_null_init(    &(sss->transop[N2N_TRANSOP_NULL_IDX]) );
     transop_twofish_init( &(sss->transop[N2N_TRANSOP_TF_IDX])  );
     transop_aes_init( &(sss->transop[N2N_TRANSOP_AESCBC_IDX])  );
+    transop_cc20_init(   &(sss->transop[N2N_TRANSOP_CC20_IDX]) );
     transop_speck_init( &(sss->transop[N2N_TRANSOP_SPECK_IDX]) );
 
     return 0; /* OK */

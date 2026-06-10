@@ -72,27 +72,6 @@
 #define N2N_MAX_TRANSFORMS              16
 #define N2N_EDGE_MGMT_PORT              5664
 
-/** Positions in the transop array where various transforms are stored.
- *
- *  Used by transop_enum_to_index(). See also the transform enumerations in
- *  n2n_transforms.h */
-#define N2N_TRANSOP_NULL_IDX    0
-#define N2N_TRANSOP_TF_IDX      1
-#define N2N_TRANSOP_AESCBC_IDX  2
-#define N2N_TRANSOP_CC20_IDX    3
-#define N2N_TRANSOP_SPECK_IDX   4
-
-
-
-/* ******************************************************* */
-
-#define N2N_EDGE_SN_HOST_SIZE   48
-
-typedef char n2n_sn_name_t[N2N_EDGE_SN_HOST_SIZE];
-
-#define N2N_EDGE_NUM_SUPERNODES 3
-#define N2N_EDGE_SUP_ATTEMPTS   3       /* Number of failed attmpts before moving on to next supernode. */
-
 /* Portable temporary buffer macros - avoids C99 compound literals which
  * cause issues on older ARM compilers (GCC 4.x / ARMv5). */
 #define MACSTR_TMP(var)      macstr_t var; memset(var, 0, sizeof(var))
@@ -125,85 +104,7 @@ static void edge_signal_handler(int sig) {
 }
 #endif
 
-/** Main structure type for edge. */
-struct n2n_edge
-{
-    int                 daemon;                 /**< Non-zero if edge should detach and run in the background. */
-    uint8_t             re_resolve_supernode_ip;
-
-    n2n_sock_t          supernode;
-    n2n_sock_t          supernode_alt;          /**< Alternate address family for supernode (family=0 if unavailable) */
-
-    size_t              sn_idx;                 /**< Currently active supernode. */
-    size_t              sn_num;                 /**< Number of supernode addresses defined. */
-    n2n_sn_name_t       sn_ip_array[N2N_EDGE_NUM_SUPERNODES];
-    int                 sn_af;
-    int                 sn_wait;                /**< Whether we are waiting for a supernode response. */
-
-    n2n_community_t     community_name;         /**< The community. 16 full octets. */
-    char                keyschedule[N2N_PATHNAME_MAXLEN];
-    int                 null_transop;           /**< Only allowed if no key sources defined. */
-    char                supernode_version[16];
-
-    SOCKET              udp_sock;                /**< IPv4 UDP socket */
-    SOCKET              udp_sock6;               /**< IPv6 UDP socket (-1 if unavailable) */
-    SOCKET              mgmt_sock;               /**< socket for status info. */
-
-    tuntap_dev          device;                 /**< All about the TUNTAP device */
-    int                 dyn_ip_mode;            /**< Interface IP address is dynamically allocated, eg. DHCP. */
-    int                 allow_routing;          /**< Accept packet no to interface address. */
-    int                 drop_multicast;         /**< Multicast ethernet addresses. */
-
-    n2n_trans_op_t      transop[N2N_MAX_TRANSFORMS]; /* one for each transform at fixed positions */
-    size_t              tx_transop_idx;         /**< The transop to use when encoding. */
-
-    struct peer_info *  known_peers;            /**< Edges we are connected to. */
-    struct peer_info *  pending_peers;          /**< Edges we have tried to register with. */
-#ifdef _WIN32
-    CRITICAL_SECTION    peers_lock;             /**< Protect known_peers/pending_peers from tunReadThread vs main thread */
-#endif
-    time_t              last_register_req;      /**< Check if time to re-register with super*/
-    size_t              register_lifetime;      /**< Time distance after last_register_req at which to re-register. */
-    time_t              last_p2p;               /**< Last time p2p traffic was received. */
-    time_t              last_sup;               /**< Last time a packet arrived from supernode. */
-    size_t              sup_attempts;           /**< Number of remaining attempts to this supernode. */
-    n2n_cookie_t        last_cookie;            /**< Cookie sent in last REGISTER_SUPER. */
-    uint8_t             sn_ack_count;           /**< Number of REGISTER_SUPER_ACKs received for current cookie (dual-stack sends 2) */
-    uint8_t             sn_ipv4_support;        /**< Supernode IPv4 support capability */
-    uint8_t             sn_ipv6_support;        /**< Supernode IPv6 support capability */
-
-    time_t              start_time;             /**< For calculating uptime */
-
-    n2n_sock_t          my_public_sock;         /**< Our own public IP:port as seen by supernode */
-
-    n2n_sock_t          local_sock;             /**< LAN address for same-NAT direct connect */
-    int                 local_sock_ena;         /**< 1 if local_sock is valid */
-
-    n2n_sock_t          local_socks[3];         /**< Additional local IPs for multi-homed hosts */
-    int                 local_socks_count;      /**< Number of additional local IPs */
-
-    /* UPnP/NAT-PMP */
-    uint16_t            upnp_mapped_port;       /**< External port mapped via UPnP/NAT-PMP, 0 if none */
-
-    /* Track last resolved supernode address for detecting changes */
-    n2n_sock_t          last_resolved_supernode; /**< Last resolved supernode address */
-    time_t              last_resolve_check;      /**< Last time we checked supernode resolution */
-
-    /* Statistics */
-    size_t              tx_p2p;
-    size_t              rx_p2p;
-    size_t              tx_sup;
-    size_t              rx_sup;
-
-#ifdef _WIN32
-    volatile int        keep_running;           /**< Set to 0 to stop tunReadThread */
-#endif
-
-    /* Rate-limiting for P2P/PsP log messages: remember last printed peer + address */
-    uint8_t             last_p2p_log_mac[N2N_MAC_SIZE];  /* MAC of last P2P direct log */
-    n2n_sock_t          last_p2p_log_addr;               /* address of last P2P direct log */
-    uint8_t             last_psp_log_mac[N2N_MAC_SIZE];  /* MAC of last PsP relay log */
-};
+/* struct n2n_edge is fully defined in n2n.h */
 
 #ifdef _WIN32
 #define PEERS_LOCK(eee)   EnterCriticalSection(&(eee)->peers_lock)
@@ -443,6 +344,9 @@ static int edge_init(n2n_edge_t * eee)
     memset(&eee->my_public_sock, 0, sizeof(n2n_sock_t));
     memset(&eee->last_resolved_supernode, 0, sizeof(n2n_sock_t));
     eee->last_resolve_check = 0;
+    eee->bp_proxy_port = 0; /* will use default */
+    eee->bp = NULL;
+    eee->bp_user_disabled = 0;
 
     if(lzo_init() != LZO_E_OK)
     {
@@ -710,6 +614,12 @@ static int n2n_tick_transop( n2n_edge_t * eee, time_t now )
 /** Deinitialise the edge and deallocate any owned memory. */
 static void edge_deinit(n2n_edge_t * eee)
 {
+    if (eee->bp) {
+        bypass_deinit(eee->bp);
+        free(eee->bp);
+        eee->bp = NULL;
+    }
+
     if (eee->udp_sock != -1) closesocket(eee->udp_sock);
     if (eee->udp_sock6 != -1) closesocket(eee->udp_sock6);
     if (eee->mgmt_sock != -1) closesocket(eee->mgmt_sock);
@@ -790,6 +700,7 @@ static void help() {
     printf("-E                       | Accept multicast MAC addresses (default: drop).\n");
     printf("-v                       | Make more verbose. Repeat as required.\n");
     printf("-t <port|path>           | Management Socket (UDP Port or absolute path). (default: %d)\n", N2N_EDGE_MGMT_PORT);
+    printf("-x [port]                | Disable bypass. Optionally set bypass port (default: %d)\n", BYPASS_DEFAULT_PORT);
     printf("-h                       | Show this help message\n");
 
     printf("\nEnvironment variables:\n");
@@ -1553,6 +1464,14 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
         struct peer_info *next = scan->next;
         time_t idle = now - scan->last_seen;
 
+        /* Skip keepalive if bypass is active for this peer */
+        if (bypass_has_peers(eee->bp) && bypass_is_peer_active(eee->bp, scan->assigned_ip)) {
+            scan->last_seen = now; /* prevent timeout */
+            prev = scan;
+            scan = next;
+            continue;
+        }
+
         /* Skip keepalive if this peer has received any traffic recently */
         if (idle < KEEPALIVE_IDLE_SECONDS) {
             prev = scan;
@@ -1933,6 +1852,10 @@ void set_peer_operational( n2n_edge_t * eee,
         traceEvent( TRACE_INFO, "Operational peers list size=%u",
                     (unsigned int)peer_list_size( eee->known_peers ) );
 
+        /* Start bypass negotiation for this peer if applicable */
+        if (eee->bp)
+            bypass_start_negotiation(eee->bp, scan);
+
     } else {
         /* Peer not in pending_peers - check if already in known_peers (late REGISTER_ACK) */
         scan = find_peer_by_mac(eee->known_peers, mac);
@@ -2240,6 +2163,7 @@ static const struct option long_options[] = {
   { "egid",            required_argument, NULL, 'g' },
   { "help"   ,         no_argument,       NULL, 'h' },
   { "verbose",         no_argument,       NULL, 'v' },
+  { "no-bypass",       optional_argument, NULL, 'x' },
   { NULL,              0,                 NULL,  0  }
 };
 
@@ -2492,7 +2416,9 @@ retry2:
         }
         else
         {
-            send_packet2net(eee, eth_pkt, len);
+            /* Try bypass first (ICMP to bypass-active peers) */
+            if (!bypass_has_peers(eee->bp) || bypass_tap_forward(eee->bp, eth_pkt, len) == 0)
+                send_packet2net(eee, eth_pkt, len);
         }
     }
 }
@@ -2629,6 +2555,13 @@ static int handle_PACKET( n2n_edge_t * eee,
 
         rx_transop_idx = transop_enum_to_index(pkt->transform);
 
+        /* Check encryption consistency: if peer uses a different transform
+         * than our local configuration, we cannot decrypt it. */
+        if ( pkt->transform != eee->transop[eee->tx_transop_idx].transform_id )
+        {
+            return -1;
+        }
+
         if ( rx_transop_idx >= 0 )
         {
             eth_payload = decodebuf;
@@ -2638,7 +2571,6 @@ static int handle_PACKET( n2n_edge_t * eee,
             ++(eee->transop[rx_transop_idx].rx_cnt); /* stats */
 
             /* Write ethernet packet to tap device. */
-            traceEvent( TRACE_INFO, "sending to TAP %u", (unsigned int)eth_size );
 
             /* Extract sender's virtual IP from first packet if not yet known */
             if ( eth_size >= 34 ) {
@@ -2660,7 +2592,55 @@ static int handle_PACKET( n2n_edge_t * eee,
                 }
             }
 
+            /* Check for bypass probe frames before writing to TAP */
+            if (eee->bp && eth_size >= 14) {
+                uint16_t bp_etype = (eth_payload[12] << 8) | eth_payload[13];
+                if (bp_etype == BYPASS_ETYPE_PROBE || bp_etype == BYPASS_ETYPE_PROBE_ACK) {
+                    int is_ack = (bp_etype == BYPASS_ETYPE_PROBE_ACK);
+                    int need_resp = bypass_handle_probe_frame(eee->bp, eth_payload, eth_size, is_ack, orig_sender);
+                    if (need_resp && !is_ack) {
+                        /* Send PROBE_ACK directly to the sender's P2P address,
+                         * bypassing find_peer_destination's relay-via-supernode logic.
+                         * This prevents "Relayed packet: addr changed" on the peer side
+                         * when the peer is still in pending_peers. */
+                        uint8_t probe_ack[19];
+                        size_t pa_len = bypass_build_probe_frame(probe_ack, eee->device.ip_addr, 1, 0);
+                        memcpy(probe_ack + 6, eee->device.mac_addr, 6); /* src MAC */
+                        memcpy(probe_ack, eth_payload + 6, 6); /* dst MAC = sender's MAC */
+
+                        n2n_mac_t destMac;
+                        uint8_t pktbuf[N2N_PKT_BUF_SIZE];
+                        size_t idx = 0;
+                        n2n_common_t cmn;
+                        n2n_PACKET_t pkt;
+                        size_t tx_transop_idx = edge_choose_tx_transop(eee);
+                        memcpy(destMac, eth_payload + 6, N2N_MAC_SIZE);
+                        memset(&cmn, 0, sizeof(cmn));
+                        cmn.ttl = N2N_DEFAULT_TTL;
+                        cmn.pc = n2n_packet;
+                        cmn.flags = 0;
+                        memcpy(cmn.community, eee->community_name, N2N_COMMUNITY_SIZE);
+                        memset(&pkt, 0, sizeof(pkt));
+                        memcpy(pkt.srcMac, eee->device.mac_addr, N2N_MAC_SIZE);
+                        memcpy(pkt.dstMac, destMac, N2N_MAC_SIZE);
+                        pkt.sock.family = 0;
+                        pkt.transform = eee->transop[tx_transop_idx].transform_id;
+                        encode_PACKET(pktbuf, &idx, &cmn, &pkt);
+                        idx += eee->transop[tx_transop_idx].fwd(
+                            &(eee->transop[tx_transop_idx]),
+                            pktbuf+idx, N2N_PKT_BUF_SIZE-idx,
+                            probe_ack, pa_len, destMac);
+                        ++(eee->transop[tx_transop_idx].tx_cnt);
+                        n2n_sock_t dest = *orig_sender;
+                        sendto_sock(sock_for_dest(eee, &dest), pktbuf, idx, &dest);
+                    }
+                    retval = 0;
+                    return retval;
+                }
+            }
+
             data_sent_len = tuntap_write(&(eee->device), eth_payload, eth_size);
+            traceEvent(TRACE_INFO, "handle_PACKET: tuntap_write done, len=%d", (signed int)data_sent_len);
 
             if (data_sent_len == eth_size)
             {
@@ -2749,18 +2729,32 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
                                 "Help for edge management console:\n"
                                 "  stop    Gracefully exit edge\n"
                                 "  help    This help message\n"
-                                "  +verb   Increase verbosity of logging\n"
-                                "  -verb   Decrease verbosity of logging\n"
+                                "  +       Increase verbosity of logging\n"
+                                "  -       Decrease verbosity of logging\n"
+                                "  x       Toggle bypass on/off\n"
                                 "  <enter> Display statistics\n\n");
             sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
                    (struct sockaddr*) &sender_sock, i);
             return;
         }
 
-    }
+        if (recvlen >= 1 && 0 == memcmp(udp_buf, "x", 1)) {
+            msg_len = 0;
+            if (eee->bp) {
+                bypass_mgmt_toggle(eee->bp);
+                eee->bp_user_disabled = eee->bp->user_disabled;
+                msg_len += snprintf((char*)(udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                    "> x %s\n", eee->bp->user_disabled ? "disabled" : "enabled");
+            } else {
+                msg_len += snprintf((char*)(udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                    "> bypass not available\n");
+            }
+            sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                   (struct sockaddr*) &sender_sock, i);
+            return;
+        }
 
-    if (recvlen >= 5) {
-        if (0 == memcmp(udp_buf, "+verb", 5)) {
+        if (recvlen >= 1 && 0 == memcmp(udp_buf, "+", 1)) {
             msg_len = 0;
             ++traceLevel;
             traceEvent(TRACE_ERROR, "+verb traceLevel=%d", traceLevel);
@@ -2771,7 +2765,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             return;
         }
 
-        if (0 == memcmp(udp_buf, "-verb", 5)) {
+        if (recvlen >= 1 && 0 == memcmp(udp_buf, "-", 1)) {
             msg_len = 0;
             if (traceLevel > 0) {
                 --traceLevel;
@@ -2786,6 +2780,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
                    (struct sockaddr*) &sender_sock, i);
             return;
         }
+
     }
 
     traceEvent(TRACE_DEBUG, "mgmt status rq");
@@ -2914,6 +2909,11 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     time_t uptime = now - eee->start_time;
     int days = uptime / 86400;
     int hours = (uptime % 86400) / 3600;
+    int mins = (uptime % 3600) / 60;
+    int secs = uptime % 60;
+    char date_str[64];
+    struct tm *tm_now = localtime(&now);
+    strftime(date_str, sizeof(date_str), "%Y-%m-%d %H:%M", tm_now);
     {
         char sup_str[32], p2p_str[32];
         if (eee->last_sup) snprintf(sup_str, sizeof(sup_str), "%lus ago", (unsigned long)(now - eee->last_sup));
@@ -2921,8 +2921,8 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
         if (eee->last_p2p) snprintf(p2p_str, sizeof(p2p_str), "%lus ago", (unsigned long)(now - eee->last_p2p));
         else strcpy(p2p_str, "never");
         msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                           "uptime %d_%dh | pend/known_peers %u/%u | last_super/p2p %s/%s\n",
-                           days, hours,
+                           "%s up %dd_%02dh_%02dm | pend/known_peers %u/%u | last_super/p2p %s/%s\n",
+                           date_str, days, hours, mins,
                            (unsigned int)peer_list_size(eee->pending_peers),
                            (unsigned int)peer_list_size(eee->known_peers),
                            sup_str, p2p_str);
@@ -2932,19 +2932,28 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
 
     {
         msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                           "transop %u,%u | super %u,%u | p2p %u,%u\n",
+                           "Transop %u/%u | super %u/%u | p2p %u/%u",
                            (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].tx_cnt,
                            (unsigned int)eee->transop[N2N_TRANSOP_NULL_IDX].rx_cnt,
                            (unsigned int)eee->tx_sup,
                            (unsigned int)eee->rx_sup,
                            (unsigned int)eee->tx_p2p,
                            (unsigned int)eee->rx_p2p);
+        /* Append bypass info if available */
+        if (eee->bp) {
+            char bp_buf[128];
+            bypass_mgmt_oneline(eee->bp, bp_buf, sizeof(bp_buf));
+            msg_len += snprintf((char*)udp_buf + msg_len, N2N_PKT_BUF_SIZE - (size_t)msg_len,
+                                " | %s", bp_buf);
+        }
+        msg_len += snprintf((char*)udp_buf + msg_len, N2N_PKT_BUF_SIZE - (size_t)msg_len,
+                            "\n");
     }
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
 
     msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                       "\nType \"help\" to see more commands.\n");
+                       "Type \"help\" to see more commands.\n");
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
 }
@@ -2960,7 +2969,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
     macstr_t            mac_buf1;
     macstr_t            mac_buf2;
 
-    uint8_t             udp_buf[N2N_PKT_BUF_SIZE];      /* Complete UDP packet */
+    static uint8_t udp_buf[BYPASS_PKT_BUF_SIZE];    /* Complete UDP packet (static to reduce stack pressure on embedded) */
     ssize_t             recvlen;
     size_t              rem;
     size_t              idx;
@@ -3011,6 +3020,64 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
     traceEvent(TRACE_INFO, "### Rx N2N UDP (%d) from %s",
                (signed int) recvlen, sock_to_cstr(sockbuf1, &sender) );
 
+    /* Check for bypass packet (has its own magic header, not n2n format).
+     * Always check magic first so packets from non-negotiated peers
+     * are silently dropped instead of falling through to decode_common(). */
+    if (recvlen >= BYPASS_HEADER_SIZE &&
+        udp_buf[0] == BYPASS_MAGIC_0 && udp_buf[1] == BYPASS_MAGIC_1 &&
+        udp_buf[2] == BYPASS_MAGIC_2) {
+        if (bypass_has_peers(eee->bp)) {
+            bypass_handle_recv(eee->bp, udp_buf, recvlen, &sender);
+            /* Drain a few more bypass packets from UDP buffer
+             * to reduce select cycle overhead at high throughput. */
+            for (int _di = 0; _di < 7; _di++) {
+                static uint8_t db[BYPASS_PKT_BUF_SIZE];
+                struct sockaddr_storage dsa;
+                socklen_t dsl = sizeof(dsa);
+                ssize_t dlen = recvfrom(fd, (char *)db, sizeof(db),
+#ifdef _WIN32
+                                         0,
+#else
+                                         MSG_DONTWAIT,
+#endif
+                                         (struct sockaddr *)&dsa, &dsl);
+                if (dlen <= 0) break;
+                if (dlen < BYPASS_HEADER_SIZE ||
+                    db[0] != BYPASS_MAGIC_0 || db[1] != BYPASS_MAGIC_1 || db[2] != BYPASS_MAGIC_2) {
+                    if ((size_t)dlen <= sizeof(udp_buf)) {
+                        memcpy(udp_buf, db, dlen);
+                        recvlen = dlen;
+                        if (dsa.ss_family == AF_INET) {
+                            struct sockaddr_in *si = (struct sockaddr_in *)&dsa;
+                            sender.family = AF_INET;
+                            memcpy(sender.addr.v4, &si->sin_addr, 4);
+                            sender.port = ntohs(si->sin_port);
+                        } else if (dsa.ss_family == AF_INET6) {
+                            struct sockaddr_in6 *si6 = (struct sockaddr_in6 *)&dsa;
+                            sender.family = AF_INET6;
+                            memcpy(sender.addr.v6, &si6->sin6_addr, 16);
+                            sender.port = ntohs(si6->sin6_port);
+                        }
+                        goto process_n2n_packet;
+                    }
+                    break;
+                }
+                n2n_sock_t ds; memset(&ds, 0, sizeof(ds));
+                if (dsa.ss_family == AF_INET) {
+                    struct sockaddr_in *si = (struct sockaddr_in *)&dsa;
+                    ds.family = AF_INET; memcpy(ds.addr.v4, &si->sin_addr, 4); ds.port = ntohs(si->sin_port);
+                } else if (dsa.ss_family == AF_INET6) {
+                    struct sockaddr_in6 *si6 = (struct sockaddr_in6 *)&dsa;
+                    ds.family = AF_INET6; memcpy(ds.addr.v6, &si6->sin6_addr, 16); ds.port = ntohs(si6->sin6_port);
+                } else continue;
+                bypass_handle_recv(eee->bp, db, (size_t)dlen, &ds);
+            }
+        }
+        return;
+    }
+
+process_n2n_packet:
+
     /* hexdump( udp_buf, recvlen ); */
 
     rem = recvlen; /* Counts down bytes of packet to protect against buffer overruns. */
@@ -3045,6 +3112,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                        sock_to_cstr(sockbuf2, orig_sender) );
 
             handle_PACKET( eee, &cmn, &pkt, orig_sender, udp_buf + idx, recvlen - idx );
+            traceEvent(TRACE_INFO, "handle_PACKET returned");
         }
         else if(msg_type == MSG_TYPE_REGISTER)
         {
@@ -4376,6 +4444,7 @@ int main(int argc, char* argv[])
      * graceful shutdown and UPnP port cleanup, even during startup. */
     signal(SIGTERM, edge_signal_handler);
     signal(SIGINT,  edge_signal_handler);
+    signal(SIGPIPE, SIG_IGN);  /* prevent write to closed socket from killing edge */
 #endif
 
     if (-1 == edge_init(&eee) ) {
@@ -4440,7 +4509,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
     optarg = NULL;
     while((opt = getopt_long(argc,
         argv,
-        "46K:k:a:A:bc:Eu:g:m:M:d:l:p:fvhrt:R:B:", long_options, NULL
+        "46K:k:a:A:bc:Eu:g:m:M:d:l:p:fvhrt:R:B:x::", long_options, NULL
     )) != EOF) {
         switch (opt) {
         case '4':
@@ -4558,6 +4627,15 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
         case 'h': /* help */
             help();
             exit(0);
+
+        case 'x': /* disable bypass, optionally set port */
+            eee.bp_user_disabled = 1;
+            if (optarg) {
+                int bp_port = atoi(optarg);
+                if (bp_port > 0 && bp_port < 65536)
+                    eee.bp_proxy_port = (uint16_t)bp_port;
+            }
+            break;
 
         case 'v': /* verbose */
             ++traceLevel;
@@ -4729,6 +4807,22 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
     if (setup_mgmt_socket(&eee, mgmt_port, mgmt_path) < 0)
         return -1;
 
+    /* Initialize bypass module */
+    {
+        uint16_t bp_port = eee.bp_proxy_port ? eee.bp_proxy_port : BYPASS_DEFAULT_PORT;
+        eee.bp_proxy_port = bp_port;
+        /* Allocate bypass context on heap to avoid large stack usage */
+        eee.bp = (bypass_context_t *)calloc(1, sizeof(bypass_context_t));
+        if (eee.bp) {
+            if (bypass_init(eee.bp, &eee, &eee.device, eee.device.ip_addr,
+                             eee.device.ip_prefixlen) < 0) {
+                traceEvent(TRACE_WARNING, "Bypass init failed, continuing without bypass");
+                free(eee.bp);
+                eee.bp = NULL;
+            }
+        }
+    }
+
     traceEvent(TRACE_NORMAL, "Edge started");
 
     setup_upnp(&eee, local_port);
@@ -4781,9 +4875,33 @@ static int run_loop(n2n_edge_t * eee )
         max_sock = max( (int) max_sock, (int) eee->device.fd );
 #endif
 
+        /* Add bypass proxy and connection sockets to select */
+        fd_set bypass_write_mask;
+        int bypass_active = bypass_has_peers(eee->bp);
+        if (bypass_active) {
+            FD_ZERO(&bypass_write_mask);
+            if (eee->bp->proxy_sock >= 0) {
+                FD_SET(eee->bp->proxy_sock, &socket_mask);
+                max_sock = max(max_sock, eee->bp->proxy_sock);
+            }
+            for (int _bci = 0; _bci < BYPASS_MAX_CONNS; _bci++) {
+                if (eee->bp->conns[_bci].state != BYPASS_CONN_FREE &&
+                    eee->bp->conns[_bci].local_sock >= 0) {
+                    if (!eee->bp->conns[_bci].fin_sent) {
+                        FD_SET(eee->bp->conns[_bci].local_sock, &socket_mask);
+                        max_sock = max(max_sock, (int)eee->bp->conns[_bci].local_sock);
+                    }
+                    if (eee->bp->conns[_bci].tx_buf_len > 0 &&
+                        !eee->bp->conns[_bci].fin_rcvd) {
+                        FD_SET(eee->bp->conns[_bci].local_sock, &bypass_write_mask);
+                    }
+                }
+            }
+        }
+
         wait_time.tv_sec = SOCKET_TIMEOUT_INTERVAL_SECS; wait_time.tv_usec = 0;
 
-        rc = select(max_sock+1, &socket_mask, NULL, NULL, &wait_time);
+        rc = select(max_sock+1, &socket_mask, bypass_active ? &bypass_write_mask : NULL, NULL, &wait_time);
         nowTime=n2n_now();
 
         /* Handle signal interruption */
@@ -4830,6 +4948,28 @@ static int run_loop(n2n_edge_t * eee )
                 readFromMgmtSocket(eee, &keep_running);
             }
 
+            /* Handle bypass proxy and connection sockets */
+            if (bypass_active) {
+                if (eee->bp->proxy_sock >= 0 && FD_ISSET(eee->bp->proxy_sock, &socket_mask)) {
+                    bypass_accept_proxy(eee->bp);
+                }
+                for (int _bci = 0; _bci < BYPASS_MAX_CONNS; _bci++) {
+                    if (eee->bp->conns[_bci].state != BYPASS_CONN_FREE &&
+                        eee->bp->conns[_bci].local_sock >= 0 &&
+                        FD_ISSET(eee->bp->conns[_bci].local_sock, &socket_mask)) {
+                        bypass_handle_local_read(eee->bp, _bci);
+                    }
+                }
+                /* Handle bypass writable sockets (flush tx_buf) */
+                for (int _bci = 0; _bci < BYPASS_MAX_CONNS; _bci++) {
+                    if (eee->bp->conns[_bci].state != BYPASS_CONN_FREE &&
+                        eee->bp->conns[_bci].local_sock >= 0 &&
+                        FD_ISSET(eee->bp->conns[_bci].local_sock, &bypass_write_mask)) {
+                        bypass_handle_local_write(eee->bp, _bci);
+                    }
+                }
+            }
+
 #ifndef _WIN32
             if(FD_ISSET(eee->device.fd, &socket_mask))
             {
@@ -4850,10 +4990,112 @@ static int run_loop(n2n_edge_t * eee )
         /* Periodically check if supernode domain resolved to a new address */
         check_supernode_domain_and_update(eee, nowTime);
 
+        /* Bypass tick: handle timeouts and state transitions */
+        if (bypass_has_peers(eee->bp)) {
+            bypass_tick(eee->bp, nowTime);
+        }
+
+        /* Re-send bypass probe frames for peers still in PROBING state.
+         * Build the encrypted n2n PACKET via send_packet2net, but override
+         * the destination to send directly to the peer's P2P UDP address,
+         * bypassing find_peer_destination's relay-via-supernode logic.
+         * This prevents "Relayed packet: addr changed" on the peer side. */
+        if (bypass_has_peers(eee->bp) && eee->bp->enabled && !eee->bp->user_disabled) {
+            uint8_t probe_buf[19 * BYPASS_MAX_PEERS];
+            int n = bypass_get_pending_probes(eee->bp, probe_buf, BYPASS_MAX_PEERS,
+                                               eee->device.ip_addr, eee->device.mac_addr);
+            for (int _pi = 0; _pi < n; _pi++) {
+                uint8_t *frame = probe_buf + _pi * 19;
+                /* Look up peer to get its P2P UDP address */
+                uint32_t p_virt_ip = 0;
+                for (int _bi = 0; _bi < BYPASS_MAX_PEERS; _bi++) {
+                    if (eee->bp->peers[_bi].state == BYPASS_PEER_PROBING &&
+                        eee->bp->peers[_bi].virt_ip != 0) {
+                        p_virt_ip = eee->bp->peers[_bi].virt_ip;
+                        break;
+                    }
+                }
+                if (p_virt_ip != 0) {
+                    struct peer_info *pi = bypass_find_peer_info(eee, p_virt_ip);
+                    if (pi) {
+                        n2n_sock_t p2p_dest;
+                        int have_p2p = 0;
+                        if (pi->sock.family == AF_INET && eee->udp_sock != -1) {
+                            p2p_dest = pi->sock; have_p2p = 1;
+                        } else if (pi->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
+                            p2p_dest = pi->sock6; have_p2p = 1;
+                        }
+                        if (have_p2p) {
+                            /* Build encrypted n2n PACKET */
+                            n2n_mac_t destMac;
+                            uint8_t pktbuf[N2N_PKT_BUF_SIZE];
+                            size_t idx = 0;
+                            n2n_common_t cmn;
+                            n2n_PACKET_t pkt;
+                            size_t tx_transop_idx = edge_choose_tx_transop(eee);
+                            memcpy(destMac, frame, N2N_MAC_SIZE);
+                            memset(&cmn, 0, sizeof(cmn));
+                            cmn.ttl = N2N_DEFAULT_TTL;
+                            cmn.pc = n2n_packet;
+                            cmn.flags = 0;
+                            memcpy(cmn.community, eee->community_name, N2N_COMMUNITY_SIZE);
+                            memset(&pkt, 0, sizeof(pkt));
+                            memcpy(pkt.srcMac, eee->device.mac_addr, N2N_MAC_SIZE);
+                            memcpy(pkt.dstMac, destMac, N2N_MAC_SIZE);
+                            pkt.sock.family = 0;
+                            pkt.transform = eee->transop[tx_transop_idx].transform_id;
+                            encode_PACKET(pktbuf, &idx, &cmn, &pkt);
+                            idx += eee->transop[tx_transop_idx].fwd(
+                                &(eee->transop[tx_transop_idx]),
+                                pktbuf+idx, N2N_PKT_BUF_SIZE-idx,
+                                frame, 19, destMac);
+                            ++(eee->transop[tx_transop_idx].tx_cnt);
+                            /* Send directly to peer's P2P address */
+                            sendto_sock(sock_for_dest(eee, &p2p_dest),
+                                        pktbuf, idx, &p2p_dest);
+                            continue;
+                        }
+                    }
+                }
+                /* Fallback: normal path */
+                send_packet2net(eee, frame, 19);
+            }
+        }
+
         PEERS_LOCK(eee);
         check_keepalive(eee, nowTime);
+        /* Before purging, clean up bypass state for peers about to be removed.
+         * Save assigned_ip of all known peers, then after purge, check which
+         * ones are gone and call bypass_peer_gone. */
+        uint32_t bp_known_ips[BYPASS_MAX_PEERS];
+        int bp_known_count = 0;
+        if (bypass_has_peers(eee->bp)) {
+            struct peer_info *scan = eee->known_peers;
+            while (scan && bp_known_count < BYPASS_MAX_PEERS) {
+                if (scan->assigned_ip != 0)
+                    bp_known_ips[bp_known_count++] = scan->assigned_ip;
+                scan = scan->next;
+            }
+        }
         numPurged =  purge_expired_registrations( &(eee->known_peers) );
         numPurged += purge_expired_registrations( &(eee->pending_peers) );
+        /* After purging, clean up bypass state for removed peers */
+        if (bypass_has_peers(eee->bp) && bp_known_count > 0) {
+            for (int _bki = 0; _bki < bp_known_count; _bki++) {
+                /* Check if this peer still exists in known_peers */
+                struct peer_info *scan = eee->known_peers;
+                int found = 0;
+                while (scan) {
+                    if (scan->assigned_ip == bp_known_ips[_bki]) {
+                        found = 1;
+                        break;
+                    }
+                    scan = scan->next;
+                }
+                if (!found)
+                    bypass_peer_gone(eee->bp, bp_known_ips[_bki]);
+            }
+        }
         PEERS_UNLOCK(eee);
         if ( numPurged > 0 )
         {

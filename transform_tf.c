@@ -33,6 +33,7 @@ struct transop_tf
     ssize_t             tx_sa;
     size_t              num_sa;
     sa_twofish_t        sa[N2N_TWOFISH_NUM_SA];
+    uint8_t             assembly[N2N_TRANSFORM_BUF_SIZE]; /* heap-allocated to avoid large stack */
 };
 
 typedef struct transop_tf transop_tf_t;
@@ -98,10 +99,9 @@ static ssize_t transop_encode_twofish( n2n_trans_op_t * arg,
 {
     ssize_t len=-1;
     transop_tf_t * priv = (transop_tf_t *)arg->priv;
-    uint8_t assembly[N2N_PKT_BUF_SIZE];
     uint32_t * pnonce;
 
-    if ( (in_len + TRANSOP_TF_NONCE_SIZE) <= N2N_PKT_BUF_SIZE )
+    if ( (in_len + TRANSOP_TF_NONCE_SIZE) <= N2N_TRANSFORM_BUF_SIZE )
     {
         if ( (in_len + TRANSOP_TF_NONCE_SIZE + TRANSOP_TF_SA_SIZE + TRANSOP_TF_VER_SIZE) <= out_len )
         {
@@ -125,12 +125,12 @@ static ssize_t transop_encode_twofish( n2n_trans_op_t * arg,
             /* The assembly buffer is a source for encrypting data. The nonce is
              * written in first followed by the packet payload. The whole
              * contents of assembly are encrypted. */
-            pnonce = (uint32_t *)assembly;
+            pnonce = (uint32_t *)priv->assembly;
             random_bytes(&sa->random, (uint8_t*) pnonce, sizeof(uint32_t));
-            memcpy( assembly + TRANSOP_TF_NONCE_SIZE, inbuf, in_len );
+            memcpy( priv->assembly + TRANSOP_TF_NONCE_SIZE, inbuf, in_len );
 
             /* Encrypt the assembly contents and write the ciphertext after the SA. */
-            len = (ssize_t)TwoFishEncryptRaw(assembly, /* source */
+            len = (ssize_t)TwoFishEncryptRaw(priv->assembly, /* source */
                                      outbuf + TRANSOP_TF_VER_SIZE + TRANSOP_TF_SA_SIZE,
                                      in_len + TRANSOP_TF_NONCE_SIZE, /* enc size */
                                      sa->enc_tf);
@@ -199,9 +199,8 @@ static ssize_t transop_decode_twofish( n2n_trans_op_t * arg,
 {
     size_t len=0;
     transop_tf_t * priv = (transop_tf_t *)arg->priv;
-    uint8_t assembly[N2N_PKT_BUF_SIZE];
 
-    if ( ( (in_len - (TRANSOP_TF_VER_SIZE + TRANSOP_TF_SA_SIZE)) <= N2N_PKT_BUF_SIZE ) /* Cipher text fits in assembly */
+    if ( ( (in_len - (TRANSOP_TF_VER_SIZE + TRANSOP_TF_SA_SIZE)) <= N2N_TRANSFORM_BUF_SIZE ) /* Cipher text fits in assembly */
          && (in_len >= (TRANSOP_TF_VER_SIZE + TRANSOP_TF_SA_SIZE + TRANSOP_TF_NONCE_SIZE) ) /* Has at least version, SA and nonce */
         )
     {
@@ -227,7 +226,7 @@ static ssize_t transop_decode_twofish( n2n_trans_op_t * arg,
                 traceEvent( TRACE_DEBUG, "decode_twofish %lu with SA %lu.", in_len, sa_rx, sa->sa_id );
 
                 len = (ssize_t)TwoFishDecryptRaw((void *)(inbuf + TRANSOP_TF_VER_SIZE + TRANSOP_TF_SA_SIZE),
-                                         assembly, /* destination */
+                                         priv->assembly, /* destination */
                                          (in_len - (TRANSOP_TF_VER_SIZE + TRANSOP_TF_SA_SIZE)),
                                          sa->dec_tf);
 
@@ -237,7 +236,7 @@ static ssize_t transop_decode_twofish( n2n_trans_op_t * arg,
                     len -= TRANSOP_TF_NONCE_SIZE; /* size of ethernet packet */
 
                     memcpy( outbuf,
-                            assembly + TRANSOP_TF_NONCE_SIZE,
+                            priv->assembly + TRANSOP_TF_NONCE_SIZE,
                             len );
                 }
                 else
