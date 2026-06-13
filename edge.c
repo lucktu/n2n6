@@ -4948,11 +4948,15 @@ static int run_loop(n2n_edge_t * eee )
             if(FD_ISSET(eee->udp_sock, &socket_mask))
             {
                 readFromIPSocket(eee, eee->udp_sock);
+                for (int _di = 0; _di < 4; _di++)
+                    readFromIPSocket(eee, eee->udp_sock);
             }
 
             if(eee->udp_sock6 != -1 && FD_ISSET(eee->udp_sock6, &socket_mask))
             {
                 readFromIPSocket(eee, eee->udp_sock6);
+                for (int _di = 0; _di < 4; _di++)
+                    readFromIPSocket(eee, eee->udp_sock6);
             }
 
             if(eee->mgmt_sock != -1 && FD_ISSET(eee->mgmt_sock, &socket_mask))
