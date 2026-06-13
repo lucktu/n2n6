@@ -2472,7 +2472,10 @@ static int handle_PACKET( n2n_edge_t * eee,
     PEERS_LOCK(eee);
     struct peer_info *scan = find_peer_by_mac(eee->known_peers, pkt->srcMac);
     if (NULL == scan) {
-        try_send_register(eee, from_supernode, pkt->srcMac, orig_sender);
+        /* Principle 3: receiving data does NOT trigger P2P setup.
+         * Direct connection is initiated only when WE have data to send
+         * (in send_packet2net -> send_PACKET). This prevents unnecessary
+         * P2P attempts triggered by broadcasts, ARPs, or other incidental traffic. */
     } else if (!from_supernode) {
         /* P2P packet: refresh direct communication timestamp */
         scan->direct_seen = now;
@@ -3499,6 +3502,7 @@ process_n2n_packet:
             pending->punch_failed = 0;
             pending->register_retry_count = 0;
             pending->psp_logged = 0;
+            pending->p2p_logged = 0;
 
             if (pending->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
                 try_send_register(eee, 1, pi.mac, &pending->sock6);
