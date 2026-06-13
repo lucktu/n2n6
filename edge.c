@@ -4717,12 +4717,33 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
             help();
             exit(0);
 
-        case 'x': /* disable bypass, optionally set port */
-            eee.bp_user_disabled = 1;
+        case 'x': /* bypass port, -x alone disables bypass */
             if (optarg) {
                 int bp_port = atoi(optarg);
-                if (bp_port > 0 && bp_port < 65536)
+                if (bp_port > 0 && bp_port < 65536) {
                     eee.bp_proxy_port = (uint16_t)bp_port;
+                    eee.bp_user_disabled = 0; /* port given = enable bypass */
+                }
+            } else {
+                /* Check next argv for a numeric argument (support -x 1234) */
+                if (optind < argc) {
+                    const char *next = argv[optind];
+                    int isnum = 1;
+                    for (const char *p = next; *p; p++) {
+                        if (!isdigit(*p)) { isnum = 0; break; }
+                    }
+                    if (isnum) {
+                        int bp_port = atoi(next);
+                        if (bp_port > 0 && bp_port < 65536) {
+                            eee.bp_proxy_port = (uint16_t)bp_port;
+                            eee.bp_user_disabled = 0;
+                            optind++;
+                            break;
+                        }
+                    }
+                }
+                /* No numeric argument: disable bypass */
+                eee.bp_user_disabled = 1;
             }
             break;
 
