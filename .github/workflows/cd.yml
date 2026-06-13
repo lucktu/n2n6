@@ -115,7 +115,7 @@ jobs:
 
       - name: Setup MSVC environment
         if: runner.os == 'windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@v1.13.0
         with:
           arch: ${{ matrix.MSVC_ARCH }}
 
@@ -123,6 +123,7 @@ jobs:
         if: runner.os == 'windows' && endsWith(matrix.TARGET, '_static')
         shell: pwsh
         run: |
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
           mkdir build
           cd build
           cmake .. `
@@ -139,6 +140,7 @@ jobs:
         if: runner.os == 'windows' && !endsWith(matrix.TARGET, '_static')
         shell: pwsh
         run: |
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
           mkdir build
           cd build
           cmake .. `
@@ -163,6 +165,7 @@ jobs:
         if: runner.os == 'Linux' && endsWith(matrix.TARGET, '_static')
         run: |
           sudo timedatectl set-timezone "Asia/Shanghai"
+          rm -rf build
           mkdir -p build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
@@ -180,6 +183,7 @@ jobs:
         if: runner.os == 'Linux' && !endsWith(matrix.TARGET, '_static')
         run: |
           sudo timedatectl set-timezone "Asia/Shanghai"
+          rm -rf build
           mkdir -p build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
@@ -207,5 +211,5 @@ jobs:
         uses: Mattraks/delete-workflow-runs@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          retain_days: 2
-          keep_minimum_runs: 0
+          retain_days: 0
+          keep_minimum_runs: 1
