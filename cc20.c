@@ -355,44 +355,33 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
                 const unsigned char *iv, cc20_context_t *ctx) {
 
     uint8_t   *keystream8 = (uint8_t*)ctx->keystream32;
-    uint32_t * in_p       = (uint32_t*)in;
-    uint32_t * out_p      = (uint32_t*)out;
-    size_t   tmp_len      = in_len;
+    size_t    tmp_len     = in_len;
+    uint32_t  aligned_in[16], aligned_out[16];
+    size_t    i, j;
 
     cc20_init_context(ctx, iv);
 
     while(in_len >= 64) {
         cc20_block_next(ctx);
 
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 0]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 1]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 2]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 3]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 4]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 5]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 6]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 7]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 8]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[ 9]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[10]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[11]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[12]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[13]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[14]; in_p++; out_p++;
-        *(uint32_t*)out_p = *(uint32_t*)in_p ^ ctx->keystream32[15]; in_p++; out_p++;
+        /* Copy input to aligned buffer, XOR, copy back.
+         * Avoids unaligned uint32_t* access which is slow on MIPS. */
+        memcpy(aligned_in, in, 64);
+        for(i = 0; i < 16; i++)
+            aligned_out[i] = aligned_in[i] ^ ctx->keystream32[i];
+        memcpy(out, aligned_out, 64);
 
+        in  += 64;
+        out += 64;
         in_len -= 64;
     }
 
     if(in_len > 0) {
         cc20_block_next(ctx);
 
-        tmp_len -= in_len;
-        while(in_len > 0) {
-            out[tmp_len] = in[tmp_len] ^ keystream8[tmp_len%64];
-            tmp_len++;
-            in_len--;
-        }
+        j = tmp_len - in_len; /* = already processed bytes */
+        for(i = 0; i < in_len; i++)
+            out[i] = in[i] ^ keystream8[(j + i) % 64];
     }
 
     return(0);

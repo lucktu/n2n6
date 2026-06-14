@@ -673,7 +673,6 @@ void _TwoFish_BlockCrypt(uint8_t *in,uint8_t *out,uint64_t size,int decrypt,TWOF
   uint8_t CnMinusOne[TwoFish_BLOCK_SIZE];
   uint8_t CBCplusCprime[TwoFish_BLOCK_SIZE];
   uint8_t Pn[TwoFish_BLOCK_SIZE];
-  uint8_t *p,*pout;
   uint32_t i;
 
   /* here is where we implement CBC mode and cipher block stealing */
@@ -681,11 +680,17 @@ void _TwoFish_BlockCrypt(uint8_t *in,uint8_t *out,uint64_t size,int decrypt,TWOF
     {   /* if we are encrypting, CBC means we XOR the plain text block with the */
         /* previous cipher text block before encrypting */
       if(!decrypt && tfdata->qBlockDefined)
-	{   for(p=in,i=0;i<TwoFish_BLOCK_SIZE;i++,p++)
-	    Pn[i]=*p ^ tfdata->qBlockCrypt[i];	/* FK: I'm copying the xor'ed input into Pn... */
+	{   uint32_t p32[4], c32[4], i32[4];
+	    memcpy(i32, in,              16);
+	    memcpy(c32, tfdata->qBlockCrypt, 16);
+	    p32[0] = i32[0] ^ c32[0];
+	    p32[1] = i32[1] ^ c32[1];
+	    p32[2] = i32[2] ^ c32[2];
+	    p32[3] = i32[3] ^ c32[3];
+	    memcpy(Pn, p32, 16);
 	}
       else
-	memcpy(Pn,in,TwoFish_BLOCK_SIZE); /* FK: same here. we work of Pn all the time. */
+	memcpy(Pn,in,TwoFish_BLOCK_SIZE);
 
       /* TwoFish block level encryption or decryption */
       _TwoFish_BlockCrypt16(Pn,out,decrypt,tfdata);
@@ -693,8 +698,14 @@ void _TwoFish_BlockCrypt(uint8_t *in,uint8_t *out,uint64_t size,int decrypt,TWOF
       /* if we are decrypting, CBC means we XOR the result of the decryption */
       /* with the previous cipher text block to get the resulting plain text */
       if(decrypt && tfdata->qBlockDefined)
-        {	for (p=out,i=0;i<TwoFish_BLOCK_SIZE;i++,p++)
-	    *p^=tfdata->qBlockPlain[i];
+        {	uint32_t o32[4], p32[4];
+	    memcpy(o32, out, 16);
+	    memcpy(p32, tfdata->qBlockPlain, 16);
+	    o32[0] ^= p32[0];
+	    o32[1] ^= p32[1];
+	    o32[2] ^= p32[2];
+	    o32[3] ^= p32[3];
+	    memcpy(out, o32, 16);
         }
 
       /* save the input and output blocks, since CBC needs these for XOR */
@@ -716,14 +727,14 @@ void _TwoFish_BlockCrypt(uint8_t *in,uint8_t *out,uint64_t size,int decrypt,TWOF
 
 	  /* we then xor the first few bytes with the "in" bytes (Cn) */
 	  /* to recover Pn, which we put in out */
-	  for(p=in,pout=out,i=0;i<size;i++,p++,pout++)
-	    *pout=*p ^ CBCplusCprime[i];
+	  for(i=0;i<size;i++)
+	    out[i] = in[i] ^ CBCplusCprime[i];
 
 	  /* We now recover the original CnMinusOne, which consists of */
 	  /* the first "size" bytes of "in" data, followed by the */
 	  /* "Cprime" portion of CBCplusCprime */
-	  for(p=in,i=0;i<size;i++,p++)
-	    CnMinusOne[i]=*p;
+	  for(i=0;i<size;i++)
+	    CnMinusOne[i] = in[i];
 	  for(;i<TwoFish_BLOCK_SIZE;i++)
 	    CnMinusOne[i]=CBCplusCprime[i];
 
@@ -775,10 +786,11 @@ void _TwoFish_ResetCBC(TWOFISH *tfdata)
 }
 
 void _TwoFish_FlushOutput(uint8_t *b,uint64_t len,TWOFISH *tfdata)
-{	uint32_t i;
-
-  for(i=0;i<len && !tfdata->dontflush;i++)
-    *tfdata->output++ = *b++;
+{
+  if(!tfdata->dontflush) {
+    memcpy(tfdata->output, b, (size_t)len);
+    tfdata->output += len;
+  }
   tfdata->dontflush=false;
 }
 
@@ -786,23 +798,11 @@ void _TwoFish_BlockCrypt16(uint8_t *in,uint8_t *out,bool decrypt,TWOFISH *tfdata
 {	uint32_t x0,x1,x2,x3;
   uint32_t k,t0,t1,R;
 
-
-  x0=*in++;
-  x0|=(*in++ << 8 );
-  x0|=(*in++ << 16);
-  x0|=(*in++ << 24);
-  x1=*in++;
-  x1|=(*in++ << 8 );
-  x1|=(*in++ << 16);
-  x1|=(*in++ << 24);
-  x2=*in++;
-  x2|=(*in++ << 8 );
-  x2|=(*in++ << 16);
-  x2|=(*in++ << 24);
-  x3=*in++;
-  x3|=(*in++ << 8 );
-  x3|=(*in++ << 16);
-  x3|=(*in++ << 24);
+  /* Load 16 bytes via memcpy to avoid byte-by-byte reads on all platforms */
+  memcpy(&x0, in,      4);
+  memcpy(&x1, in + 4,  4);
+  memcpy(&x2, in + 8,  4);
+  memcpy(&x3, in + 12, 4);
 
   if(decrypt)
     {	x0 ^= tfdata->subKeys[4];	/* swap input and output whitening keys when decrypting */
@@ -861,25 +861,11 @@ void _TwoFish_BlockCrypt16(uint8_t *in,uint8_t *out,bool decrypt,TWOFISH *tfdata
       x1 ^= tfdata->subKeys[7];
     }
 
-  *out++ = (uint8_t)(x2      );
-  *out++ = (uint8_t)(x2 >>  8);
-  *out++ = (uint8_t)(x2 >> 16);
-  *out++ = (uint8_t)(x2 >> 24);
-
-  *out++ = (uint8_t)(x3      );
-  *out++ = (uint8_t)(x3 >>  8);
-  *out++ = (uint8_t)(x3 >> 16);
-  *out++ = (uint8_t)(x3 >> 24);
-
-  *out++ = (uint8_t)(x0      );
-  *out++ = (uint8_t)(x0 >>  8);
-  *out++ = (uint8_t)(x0 >> 16);
-  *out++ = (uint8_t)(x0 >> 24);
-
-  *out++ = (uint8_t)(x1      );
-  *out++ = (uint8_t)(x1 >>  8);
-  *out++ = (uint8_t)(x1 >> 16);
-  *out++ = (uint8_t)(x1 >> 24);
+  /* Write 16 bytes output via memcpy (4 x uint32_t) */
+  memcpy(out,      &x2, 4);
+  memcpy(out + 4,  &x3, 4);
+  memcpy(out + 8,  &x0, 4);
+  memcpy(out + 12, &x1, 4);
 }
 
 /**

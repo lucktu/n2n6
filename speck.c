@@ -599,33 +599,42 @@ int speck_ctr (unsigned char *out, const unsigned char *in, unsigned long long i
 	       const unsigned char *n, speck_context_t *ctx) {
 
   u64 i, nonce[2], x, y, t;
-  unsigned char *block = malloc (16);
+  u64 block[2];  /* 16 bytes: stack-allocated, aligned, no malloc/free */
 
   if (!inlen) {
-    free (block);
     return 0;
   }
-  nonce[0] = htole64 ( ((u64*)n)[0] );
-  nonce[1] = htole64 ( ((u64*)n)[1] );
 
-  t=0;
+  /* Load nonce via memcpy to avoid unaligned u64* access on MIPS */
+  memcpy(&nonce[0], n,     8);
+  memcpy(&nonce[1], n + 8, 8);
+  nonce[0] = htole64(nonce[0]);
+  nonce[1] = htole64(nonce[1]);
+
+  t = 0;
   while (inlen >= 16) {
+    u64 in0, in1, xor0, xor1;
     x = nonce[1]; y = nonce[0]; nonce[0]++;
     speck_encrypt (&x, &y, ctx);
-    ((u64 *)out)[1+t] = htole64 (x ^ ((u64 *)in)[1+t]);
-    ((u64 *)out)[0+t] = htole64 (y ^ ((u64 *)in)[0+t]);
+    x = htole64(x); y = htole64(y);
+    /* All data movement via memcpy to avoid unaligned u64* access on MIPS */
+    memcpy(&in0, in + 8 * t,     8);
+    memcpy(&in1, in + 8 * t + 8, 8);
+    xor0 = y ^ in0;
+    xor1 = x ^ in1;
+    memcpy(out + 8 * t,     &xor0, 8);
+    memcpy(out + 8 * t + 8, &xor1, 8);
     t += 2;
     inlen -= 16;
   }
   if (inlen > 0) {
     x = nonce[1]; y = nonce[0];
     speck_encrypt (&x, &y, ctx);
-    ((u64 *)block)[1] = htole64 (x); ((u64 *)block)[0] = htole64 (y);
+    block[1] = htole64(x); block[0] = htole64(y);
     for (i = 0; i < inlen; i++)
-      out[i + 8*t] = block[i] ^ in[i + 8*t];
+      out[i + 8*t] = ((unsigned char*)block)[i] ^ in[i + 8*t];
   }
 
-  free (block);
   return 0;
 }
 
