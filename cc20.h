@@ -48,7 +48,11 @@ typedef struct cc20_context_t {
 } cc20_context_t;
 
 
-#elif defined (__SSE2__)  // SSE2 ---------------------------------------------------------------------------------
+/* MSVC doesn't define __SSE2__, so check its equivalents:
+ *   _M_IX86_FP >= 2 → x86 with SSE2
+ *   _M_AMD64 / _M_X64 → x64 (SSE2 always available) */
+#elif defined (__SSE2__) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(_M_AMD64) || defined(_M_X64)
+// SSE2 support ---------------------------------------------------------------------------------
 
 
 typedef struct cc20_context {

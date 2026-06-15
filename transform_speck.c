@@ -76,7 +76,11 @@ ssize_t transop_encode_speck(n2n_trans_op_t *arg,
     idx += N2N_SPECK_NONCE_SIZE;
 
     /* Encrypt data */
+#ifdef SPECK_CTX_BYVAL
+    speck_ctr(outbuf + idx, inbuf, in_len, nonce, priv->ctx);
+#else
     speck_ctr(outbuf + idx, inbuf, in_len, nonce, &priv->ctx);
+#endif
     idx += in_len;
 
     traceEvent(TRACE_DEBUG, "encode_speck: encrypted %u bytes.\n", in_len);
@@ -110,7 +114,11 @@ ssize_t transop_decode_speck(n2n_trans_op_t *arg,
     idx += N2N_SPECK_NONCE_SIZE;
 
     /* Decrypt data */
+#ifdef SPECK_CTX_BYVAL
+    speck_ctr(outbuf, inbuf + idx, in_len - idx, nonce, priv->ctx);
+#else
     speck_ctr(outbuf, inbuf + idx, in_len - idx, nonce, &priv->ctx);
+#endif
 
     traceEvent(TRACE_DEBUG, "decode_speck: decrypted %u bytes.\n", in_len - idx);
     return in_len - idx;

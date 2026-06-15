@@ -6,7 +6,7 @@
 #define u32 uint32_t
 #define u64 uint64_t
 
-#if defined (__AVX2__)
+#if defined (__AVX2__)	// AVX support ----------------------------------------------------
 #define SPECK_ALIGNED_CTX 32
 #include <immintrin.h>
 #define u256 __m256i
@@ -14,7 +14,9 @@ typedef struct {
     u256 rk[34];
     u64 key[34];
 } speck_context_t;
-#elif defined (__SSE4_2__)
+/* MSVC doesn't define __SSE4_2__, but x64 (checked via _M_AMD64 / _M_X64)
+ * always has SSSE3+ which is all the SSE path needs. */
+#elif defined (__SSE4_2__) || defined(_M_AMD64) || defined(_M_X64) // SSE support -------------------------------------------------
 #define SPECK_ALIGNED_CTX 16
 #define SPECK_CTX_BYVAL 1
 #include <immintrin.h>

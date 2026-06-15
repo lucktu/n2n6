@@ -84,7 +84,11 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
 }
 
 
-#elif defined (__SSE2__)  // SSE2 ---------------------------------------------------------------------------------
+/* MSVC doesn't define __SSE2__, so check its equivalents:
+ *   _M_IX86_FP >= 2 → x86 with SSE2
+ *   _M_AMD64 / _M_X64 → x64 (SSE2 always available) */
+#elif defined (__SSE2__) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(_M_AMD64) || defined(_M_X64)
+// SSE2 support ---------------------------------------------------------------------------------
 
 
 // taken (and heavily modified and enhanced) from
@@ -105,7 +109,8 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
 #define ONE   _mm_setr_epi32(1, 0, 0, 0)
 #define TWO   _mm_setr_epi32(2, 0, 0, 0)
 
-#if defined (__SSSE3__) // --- SSSE3
+/* MSVC doesn't define __SSSE3__. x64 always has SSSE3, so enable for MSVC x64. */
+#if defined (__SSSE3__) || defined(_M_AMD64) || defined(_M_X64) // --- SSSE3
 
 #define L8  _mm_set_epi32(0x0e0d0c0fL, 0x0a09080bL, 0x06050407L, 0x02010003L)
 #define L16 _mm_set_epi32(0x0d0c0f0eL, 0x09080b0aL, 0x05040706L, 0x01000302L)

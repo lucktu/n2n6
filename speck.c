@@ -21,6 +21,9 @@
 #endif
 
 #if defined (__AVX2__)	// AVX support ----------------------------------------------------
+/* Note: MSVC defines _M_AMD64 / _M_X64 instead of __AVX2__.
+ * AVX2 detection on MSVC needs __AVX2__ from the compiler (not _M_AMD64),
+ * so this AVX2 path is only used by GCC/Clang with -mavx2. */
 
 
 #define LCS(x,r) (((x)<<r)|((x)>>(64-r)))
@@ -221,7 +224,9 @@ int speck_expand_key (const unsigned char *k, speck_context_t *ctx) {
 }
 
 
-#elif defined (__SSE4_2__) // SSE support -------------------------------------------------
+/* MSVC doesn't define __SSE4_2__, but x64 (checked via _M_AMD64 / _M_X64)
+ * always has SSSE3+ which is all the SSE path needs. */
+#elif defined (__SSE4_2__) || defined(_M_AMD64) || defined(_M_X64) // SSE support -------------------------------------------------
 
 
 #define LCS(x,r) (((x)<<r)|((x)>>(64-r)))
