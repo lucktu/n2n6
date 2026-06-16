@@ -139,14 +139,6 @@ if(NOT DEFINED WIN32)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gc-sections")
 endif()
 
-if(NOT DEFINED WIN32)
-#add_executable(test test.c)
-#target_link_libraries(test n2n)
-
-#add_executable(benchmark benchmark.c)
-#target_link_libraries(benchmark n2n)
-endif(NOT DEFINED WIN32)
-
 # Installation
 install(TARGETS edge supernode
         RUNTIME DESTINATION sbin
