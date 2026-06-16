@@ -3899,7 +3899,7 @@ static int parse_dns_txt_response(const uint8_t *buf, size_t buf_len, uint16_t t
 static int query_txt_record(const char *domain, char *txt_result, size_t result_size) {
     if (!domain || !txt_result || result_size == 0)
         return -1;
-    traceEvent(TRACE_NORMAL, "Querying TXT record for %s", domain);
+    traceEvent(TRACE_INFO, "Querying TXT record for %s", domain);
     /* Public DNS servers to try */
     const char *dns_servers[] = {"8.8.8.8", "119.29.29.29", "1.1.1.1", "223.5.5.5"};
     uint8_t query_buf[256];
@@ -3950,7 +3950,7 @@ static int query_txt_record(const char *domain, char *txt_result, size_t result_
         if (resp_len > 0) {
             /* Parse DNS response */
             if (parse_dns_txt_response(response_buf, resp_len, txn_id, txt_result, result_size) == 0) {
-                traceEvent(TRACE_NORMAL, "TXT record found: %s", txt_result);
+                traceEvent(TRACE_INFO, "TXT record found: %s", txt_result);
                 return 0;
             }
         }
@@ -4858,6 +4858,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
         exit(1);
     }
 
+    printf("\n");
     traceEvent(TRACE_NORMAL, "Starting edge %s", n2n_sw_version);
 
     for (int i = 0; i < eee.sn_num; ++i) {
