@@ -42,10 +42,144 @@ extern ssize_t sendto_sock(SOCKET fd, const void *buf, size_t len, const n2n_soc
 static const uint8_t bypass_zero_mac[6] = {0, 0, 0, 0, 0, 0};
 
 /* Forward declarations */
+static void bypass_build_header(uint8_t *buf, uint8_t algo_idx,
+                                 uint8_t flags, uint32_t conn_id);
+static int bypass_sendto_nb(bypass_context_t *ctx, const uint8_t *buf, size_t len,
+                             const n2n_sock_t *dst);
 static bypass_peer_entry_t *bypass_alloc_peer(bypass_context_t *ctx);
 struct peer_info *bypass_find_peer_info(struct n2n_edge *eee, uint32_t virt_ip_host);
 static void bypass_conn_update_peer_last_seen(bypass_context_t *ctx, struct bypass_conn *c);
 static void bypass_update_peer_last_seen(struct n2n_edge *eee, uint32_t virt_ip_host);
+
+/* ===== KCP reliable transport ===== */
+
+/** KCP output callback: encrypt a KCP segment and send via non-blocking UDP.
+ *  Called by ikcp_flush() when KCP has data/acks to transmit.
+ *  Returns len on success (KCP ignores the return value; RTO handles losses). */
+static int bypass_kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
+{
+    struct bypass_conn *c = (struct bypass_conn *)user;
+    bypass_context_t *ctx = (bypass_context_t *)c->user_data;
+    bypass_build_header(c->pkt_buf, ctx->tx_transop_idx, BYPASS_FLAG_KCP, c->conn_id);
+    size_t pkt_off = BYPASS_HEADER_SIZE;
+    ssize_t elen = bypass_encode(ctx, c->pkt_buf + pkt_off,
+                                  BYPASS_PKT_BUF_SIZE - pkt_off,
+                                  (const uint8_t *)buf, (size_t)len, bypass_zero_mac);
+    if (elen <= 0) return len;
+    bypass_sendto_nb(ctx, c->pkt_buf, pkt_off + (size_t)elen, &c->peer_addr);
+    return len;
+}
+
+/** KCP clock: milliseconds since connection start. */
+static IUINT32 bypass_kcp_time(struct bypass_conn *c)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    IUINT64 now_ms = (IUINT64)ts.tv_sec * 1000 + (IUINT64)ts.tv_nsec / 1000000;
+    return (IUINT32)(now_ms - c->kcp_base);
+}
+
+/** Drain received KCP data to local socket.
+ *  Reads all available segments from KCP receive buffer and writes them
+ *  to the local TCP socket (or tx_buf if socket is congested).
+ *  When tx_buf is full, stop draining — data stays in KCP's receive
+ *  buffer. This naturally closes rcv_wnd, providing backpressure.
+ *  Returns 1 if any data was drained, 0 otherwise. */
+static int bypass_kcp_drain(bypass_context_t *ctx, struct bypass_conn *c)
+{
+    int drained = 0;
+    while (c->tx_buf_len < BYPASS_TX_BUF_SIZE) {
+        int peek = ikcp_peeksize(c->kcp);
+        if (peek <= 0)
+            break;
+        int ret = ikcp_recv(c->kcp, (char *)c->agg_buf, (int)BYPASS_MAX_PAYLOAD);
+        if (ret <= 0)
+            break;
+        drained = 1;
+
+        ssize_t sent = send(c->local_sock, (const char *)c->agg_buf,
+                            (size_t)ret, MSG_DONTWAIT);
+        if (sent > 0) {
+            c->rx_bytes += (size_t)sent;
+            ctx->bp_rx_bytes += (size_t)sent;
+            if ((size_t)sent < (size_t)ret) {
+                size_t rem = (size_t)ret - (size_t)sent;
+                if (c->tx_buf_len + rem <= BYPASS_TX_BUF_SIZE) {
+                    memcpy(c->tx_buf + c->tx_buf_len, c->agg_buf + sent, rem);
+                    c->tx_buf_len += rem;
+                }
+                break;
+            }
+        } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (c->tx_buf_len + (size_t)ret <= BYPASS_TX_BUF_SIZE) {
+                memcpy(c->tx_buf + c->tx_buf_len, c->agg_buf, (size_t)ret);
+                c->tx_buf_len += (size_t)ret;
+            }
+            break;
+        }
+        if (sent <= 0 && (sent == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)))
+            break;
+    }
+    /* Tell KCP to send window update if we drained data */
+    if (drained && c->kcp)
+        c->kcp->probe |= 2;  /* IKCP_ASK_TELL */
+    return drained;
+}
+
+/** Check if a peer is on the same LAN.
+ *  Reads the authoritative p2p_is_lan flag set by edge.c at
+ *  REGISTER_SUPER_ACK time, when the old n2n P2P path determined
+ *  LAN vs WAN. This is the definitive source — bypass does not
+ *  re-derive this state from sockets[] or subnets.
+ *  Returns 1 if same LAN, 0 if WAN or undetermined. */
+static int bypass_is_lan_peer(bypass_context_t *ctx, uint32_t virt_ip_host)
+{
+    struct peer_info *pi = bypass_find_peer_info(ctx->edge, virt_ip_host);
+    if (!pi)
+        return 0;
+    return pi->p2p_is_lan;
+}
+
+/** Initialize KCP session for a connection after handshake completes.
+ *  Must be called on both sides (initiator + responder).
+ *  @param c  connection context
+ *  @param is_lan  1 = LAN peer (aggressive MTU), 0 = WAN peer (frag-safe MTU) */
+static void bypass_kcp_init(struct bypass_conn *c, int is_lan)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    c->kcp_base = (IUINT64)ts.tv_sec * 1000 + (IUINT64)ts.tv_nsec / 1000000;
+    c->kcp = ikcp_create(c->conn_id, (void *)c);
+    ikcp_setoutput(c->kcp, bypass_kcp_output);
+    /* nodelay=1: faster response (RTO_min=30ms instead of 100ms).
+     * On WAN links with ~15ms RTT, the default 100ms RTO causes 100ms
+     * stalls on every packet loss. With nodelay=1, RTO adapts faster and
+     * loss recovery is ~3× quicker.
+     * interval=10ms: flush every 10ms for responsive ACK.
+     * resend=2: fast retransmit after 2 dup ACKs (avoids RTO on single loss).
+     * nc=1: disable KCP's built-in congestion control (we manage window). */
+    ikcp_nodelay(c->kcp, 1, 10, 2, 1);
+    /* Send window: 1024 segments.
+     * Receive window: 1024 segments.
+     * Note: actual throughput is governed by rmt_wnd (receiver's available
+     * window) and the waitsnd limit in bypass_handle_local_read. */
+    ikcp_wndsize(c->kcp, 1024, 1024);
+    if (is_lan) {
+        /* LAN: MTU=8216 → ~4 KCP segments per 32KB TCP read.
+         * Good balance of low overhead and reliable drain.
+         * Only used when peer is on the same /24 subnet (true LAN). */
+        ikcp_setmtu(c->kcp, KCP_MTU_LAN);
+        c->max_read_limit = 0; /* use default = BYPASS_MAX_PAYLOAD */
+    } else {
+        /* WAN: small MTU (1400) → 1 IP fragment per UDP packet.
+         * Eliminates fragment loss as a cause of stalling. With
+         * waitsnd=1024, pipeline = 1.4MB in-flight.
+         * Read limit 4096 per cycle prevents drain bursts that
+         * cause rmt_wnd collapse on lossy/high-latency links. */
+        ikcp_setmtu(c->kcp, KCP_MTU_WAN);
+        c->max_read_limit = 4096;
+    }
+}
 
 /* ===== Bypass header building/parsing ===== */
 
@@ -222,16 +356,6 @@ static int bypass_find_conn_by_id(bypass_context_t *ctx, uint32_t conn_id)
     return -1;
 }
 
-static int bypass_find_conn_by_sock(bypass_context_t *ctx, SOCKET sock)
-{
-    for (int i = 0; i < BYPASS_MAX_CONNS; i++) {
-        if (ctx->conns[i].state != BYPASS_CONN_FREE &&
-            ctx->conns[i].local_sock == sock)
-            return i;
-    }
-    return -1;
-}
-
 static int bypass_alloc_conn(bypass_context_t *ctx)
 {
     for (int i = 0; i < BYPASS_MAX_CONNS; i++) {
@@ -241,12 +365,12 @@ static int bypass_alloc_conn(bypass_context_t *ctx)
             c->tx_buf = (uint8_t *)calloc(1, BYPASS_TX_BUF_SIZE);
             c->agg_buf = (uint8_t *)calloc(1, BYPASS_MAX_PAYLOAD);
             c->pkt_buf = (uint8_t *)calloc(1, BYPASS_PKT_BUF_SIZE);
-            c->dec_buf = (uint8_t *)calloc(1, BYPASS_MAX_PAYLOAD + BYPASS_ENCRYPT_OVERHEAD);
-            if (!c->tx_buf || !c->agg_buf || !c->pkt_buf || !c->dec_buf) {
+            c->kcp_buf = (uint8_t *)calloc(1, BYPASS_PKT_BUF_SIZE);
+            if (!c->tx_buf || !c->agg_buf || !c->pkt_buf || !c->kcp_buf) {
                 free(c->tx_buf); c->tx_buf = NULL;
                 free(c->agg_buf); c->agg_buf = NULL;
                 free(c->pkt_buf); c->pkt_buf = NULL;
-                free(c->dec_buf); c->dec_buf = NULL;
+                free(c->kcp_buf); c->kcp_buf = NULL;
                 return -1;
             }
             return i;
@@ -263,11 +387,16 @@ static void bypass_free_conn(bypass_context_t *ctx, int idx)
         closesocket(c->local_sock);
         c->local_sock = -1;
     }
+    /* Free KCP and its buffers */
+    if (c->kcp) {
+        ikcp_release(c->kcp);
+        c->kcp = NULL;
+    }
+    free(c->kcp_buf);  c->kcp_buf = NULL;
     /* Free dynamically allocated buffers */
     free(c->tx_buf);   c->tx_buf = NULL;
     free(c->agg_buf);  c->agg_buf = NULL;
     free(c->pkt_buf);  c->pkt_buf = NULL;
-    free(c->dec_buf);  c->dec_buf = NULL;
     memset(c, 0, sizeof(*c));
     c->state = BYPASS_CONN_FREE;
     c->local_sock = -1;
@@ -347,11 +476,11 @@ void bypass_accept_proxy(bypass_context_t *ctx)
     int one = 1;
     setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof(one));
     {
-        int rcvbuf = 256 * 1024;
+        int rcvbuf = 1024 * 1024;
         setsockopt(client_sock, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbuf, sizeof(rcvbuf));
     }
     {
-        int sndbuf = 256 * 1024;
+        int sndbuf = 1024 * 1024;
         setsockopt(client_sock, SOL_SOCKET, SO_SNDBUF, (char *)&sndbuf, sizeof(sndbuf));
     }
 
@@ -387,6 +516,14 @@ void bypass_accept_proxy(bypass_context_t *ctx)
                                      payload, 6, bypass_zero_mac);
     if (enc_len > 0) {
         bypass_sendto(ctx, pkt, BYPASS_HEADER_SIZE + enc_len, &peer_addr);
+        /* Init KCP immediately so bypass_handle_local_read can feed
+         * TCP data to KCP before SYN-ACK arrives.
+         * Use is_lan from peer entry (determined at negotiation time,
+         * guaranteed reliable — no race with peer_info population). */
+        bypass_peer_entry_t *pe_lan = bypass_find_peer(ctx, dst_virt_ip);
+        int is_lan = pe_lan ? pe_lan->is_lan : 0;
+        bypass_kcp_init(c, is_lan);
+        c->user_data = (void *)ctx;
         traceEvent(TRACE_DEBUG, "bypass: SYN sent conn_id=%u -> %s:%u",
                    (unsigned)c->conn_id,
                    inet_ntoa((struct in_addr){htonl(dst_virt_ip)}),
@@ -397,16 +534,14 @@ void bypass_accept_proxy(bypass_context_t *ctx)
 /* ===== Proxy: read data from local socket, send via bypass ===== */
 
 /** Write handler: flush pending tx_buf to local socket (called when select
- *  reports the local_sock is writable). This prevents write-side starvation
- *  when TCP send buffer fills up in reverse direction. */
+ *  reports the local_sock is writable). Also drain KCP after tx_buf flush
+ *  to keep rcv_wnd open. */
 void bypass_handle_local_write(bypass_context_t *ctx, int idx)
 {
     struct bypass_conn *c = &ctx->conns[idx];
     if (c->state < BYPASS_CONN_ESTABLISHED)
         return;
 
-    /* If remote sent FIN, we already shutdown(local_sock, SHUT_WR),
-     * so no more writes to local socket. */
     if (c->fin_rcvd)
         return;
 
@@ -415,6 +550,8 @@ void bypass_handle_local_write(bypass_context_t *ctx, int idx)
         ssize_t nf = send(c->local_sock, (const char *)c->tx_buf,
                           c->tx_buf_len, MSG_DONTWAIT);
         if (nf > 0) {
+            c->rx_bytes += (size_t)nf;
+            ctx->bp_rx_bytes += (size_t)nf;
             if ((size_t)nf < c->tx_buf_len) {
                 memmove(c->tx_buf, c->tx_buf + nf, c->tx_buf_len - (size_t)nf);
                 c->tx_buf_len -= (size_t)nf;
@@ -423,32 +560,35 @@ void bypass_handle_local_write(bypass_context_t *ctx, int idx)
             }
         }
     }
+
+    /* After flushing tx_buf, drain more from KCP and send window update */
+    if (c->kcp) {
+        if (bypass_kcp_drain(ctx, c) > 0)
+            ikcp_update(c->kcp, bypass_kcp_time(c));
+    }
 }
 
 void bypass_handle_local_read(bypass_context_t *ctx, int idx)
 {
     struct bypass_conn *c = &ctx->conns[idx];
 
-    /* Safety: if fin_sent=1, we shouldn't be reading local_sock.
-     * The select loop skips fin_sent connections, but this guards
-     * against race conditions within a single select iteration. */
     if (c->fin_sent)
         return;
 
-    /* Aggregated read + multi-chunk encrypt + single sendto.
-     *  Collects up to BYPASS_MAX_PAYLOAD bytes from local socket via
-     *  multiple non-blocking recv() calls, then splits into chunks,
-     *  encrypts each with a 4-byte chunk header (enc_len:2, plain_len:2),
-     *  and packs into one UDP datagram.
-     *  Uses conn's agg_buf/pkt_buf to avoid large stack allocations
-     *  (safe for embedded devices with limited stack).
-     * Uses blocking sendto for data to prevent packet loss.
-     * FIN uses non-blocking sendto to avoid hanging on close. */
+    /* Backpressure: limit KCP pipeline to snd_wnd (1024) segments.
+     * Without this, snd_queue grows unbounded (KCP only caps snd_buf
+     * via snd_wnd, not snd_queue), causing memory exhaustion and
+     * segfaults at high throughput. Limit = snd_wnd = 1024 segments
+     * = 1024 × 4000 = 4MB in-flight max, supporting ~160Mbps at 200ms RTT. */
+    if (c->kcp && ikcp_waitsnd(c->kcp) >= 1024)
+        return;
+
+    size_t read_limit = (c->kcp && c->max_read_limit) ? c->max_read_limit : BYPASS_MAX_PAYLOAD;
     size_t total = 0;
     int eof = 0;
 
-    for (int _ri = 0; _ri < 64 && total < BYPASS_MAX_PAYLOAD; _ri++) {
-        size_t space = BYPASS_MAX_PAYLOAD - total;
+    for (int _ri = 0; _ri < 64 && total < read_limit; _ri++) {
+        size_t space = read_limit - total;
         if (space == 0)
             break;
         ssize_t n = recv(c->local_sock, (char *)c->agg_buf + total,
@@ -468,53 +608,22 @@ void bypass_handle_local_read(bypass_context_t *ctx, int idx)
         }
     }
 
-    if (total > 0) {
-        /* Build and send each encrypted chunk as a separate UDP packet.
-         * This avoids IP fragmentation (MTU 1500) while keeping the
-         * 64KB aggregate read (reduces per-call encrypt overhead). */
-        size_t offset = 0;
-
-        while (offset < total) {
-            size_t chunk = total - offset;
-            if (chunk > (size_t)BYPASS_MAX_CHUNK)
-                chunk = (size_t)BYPASS_MAX_CHUNK;
-
-            /* Build per-chunk packet: header + chunk_hdr(4) + encrypted_data */
-            bypass_build_header(c->pkt_buf, ctx->tx_transop_idx, BYPASS_FLAG_DATA, c->conn_id);
-            size_t pkt_off = BYPASS_HEADER_SIZE;
-
-            /* Encrypt this chunk */
-            ssize_t elen = bypass_encode(ctx, c->pkt_buf + pkt_off + 4,
-                                          BYPASS_PKT_BUF_SIZE - pkt_off - 4,
-                                          c->agg_buf + offset, chunk, bypass_zero_mac);
-            if (elen <= 0)
-                break;
-
-            /* Write chunk header (enc_len:2, plain_len:2) before encrypted data */
-            c->pkt_buf[pkt_off]     = (elen >> 8) & 0xFF;
-            c->pkt_buf[pkt_off + 1] = elen & 0xFF;
-            c->pkt_buf[pkt_off + 2] = (chunk >> 8) & 0xFF;
-            c->pkt_buf[pkt_off + 3] = chunk & 0xFF;
-            pkt_off += 4 + (size_t)elen;
-
-            /* Send this chunk as a separate UDP packet (fits in MTU ~1500) */
-            int ret = bypass_sendto(ctx, c->pkt_buf, pkt_off, &c->peer_addr);
-            if (ret > 0) {
-                c->tx_bytes += chunk;
-                ctx->bp_tx_bytes += chunk;
-                c->last_active = n2n_now();
-                bypass_conn_update_peer_last_seen(ctx, c);
-            }
-
-            offset += chunk;
+    if (total > 0 && c->kcp) {
+        /* Feed data into KCP — KCP handles fragmentation, congestion
+         * control, and retransmission. The output callback (bypass_kcp_output)
+         * encrypts each segment and sends it via UDP with BYPASS_FLAG_KCP. */
+        int ret = ikcp_send(c->kcp, (const char *)c->agg_buf, (int)total);
+        if (ret < 0) {
+            traceEvent(TRACE_DEBUG, "bypass: ikcp_send failed %d conn_id=%u",
+                       ret, (unsigned)c->conn_id);
         }
+        c->tx_bytes += total;
+        ctx->bp_tx_bytes += total;
+        c->last_active = n2n_now();
+        bypass_conn_update_peer_last_seen(ctx, c);
     }
 
     if (eof) {
-        /* Local socket EOF: our side is done writing.
-         * Send FIN to remote but don't close yet - remote may still
-         * have data to send us (TCP half-close). Only free the
-         * connection when both sides have finished (fin_sent + fin_rcvd). */
         uint8_t fin_buf[64];
         bypass_build_header(fin_buf, ctx->tx_transop_idx, BYPASS_FLAG_FIN, c->conn_id);
         ssize_t enc_len = bypass_encode(ctx, fin_buf + BYPASS_HEADER_SIZE,
@@ -526,7 +635,6 @@ void bypass_handle_local_read(bypass_context_t *ctx, int idx)
         traceEvent(TRACE_INFO, "bypass: local_sock EOF conn_id=%u (half-close, fin_rcvd=%d)",
                    (unsigned)c->conn_id, c->fin_rcvd);
         if (c->fin_rcvd) {
-            /* Both sides done - safe to close */
             bypass_free_conn(ctx, idx);
         }
     }
@@ -601,6 +709,9 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
             if (c->state == BYPASS_CONN_CONNECTING) {
                 c->state = BYPASS_CONN_ESTABLISHED;
                 c->last_active = n2n_now();
+                /* KCP was initialized at SYN time; peer entry's is_lan
+                 * determined LAN/WAN reliably at negotiation time. */
+                c->user_data = (void *)ctx;
                 traceEvent(TRACE_DEBUG, "bypass: conn %u ESTABLISHED (SYN-ACK)",
                            (unsigned)conn_id);
             }
@@ -642,11 +753,11 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
         int one = 1;
         setsockopt(out_sock, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof(one));
         {
-            int rcvbuf = 256 * 1024;
+            int rcvbuf = 1024 * 1024;
             setsockopt(out_sock, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbuf, sizeof(rcvbuf));
         }
         {
-            int sndbuf = 256 * 1024;
+            int sndbuf = 1024 * 1024;
             setsockopt(out_sock, SOL_SOCKET, SO_SNDBUF, (char *)&sndbuf, sizeof(sndbuf));
         }
 
@@ -689,6 +800,15 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
         c->initiator = 0;
         c->last_active = n2n_now();
 
+        /* Init KCP on responder side using pre-determined is_lan
+         * (set at peer negotiation — reliable, no race). */
+        {
+            bypass_peer_entry_t *pe_lan = bypass_find_peer(ctx, sender_virt_ip);
+            int is_lan = pe_lan ? pe_lan->is_lan : 0;
+            bypass_kcp_init(c, is_lan);
+        }
+        c->user_data = (void *)ctx;
+
         /* Reply SYN to confirm connection */
         uint8_t resp[64];
         bypass_build_header(resp, ctx->tx_transop_idx, BYPASS_FLAG_SYN, conn_id);
@@ -703,95 +823,28 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
         return;
     }
 
-    if (flags & BYPASS_FLAG_DATA) {
+    if (flags & BYPASS_FLAG_KCP) {
+        /* KCP segment from peer. Decrypt and feed to KCP.
+         * KCP handles ordering, retransmission, and congestion control. */
         int idx = bypass_find_conn_by_id(ctx, conn_id);
         if (idx < 0)
             return;
 
         struct bypass_conn *c = &ctx->conns[idx];
 
-        /* If we already received FIN, remote shouldn't send more data,
-         * but if it does, we can't write to local_sock (SHUT_WR). Skip. */
-        if (c->fin_rcvd)
+        ssize_t dec_len = bypass_decode(ctx, c->kcp_buf, BYPASS_PKT_BUF_SIZE,
+                                         enc_payload, enc_len, algo_idx);
+        if (dec_len <= 0)
             return;
 
-        /* Decode all chunks in this UDP datagram.
-         * Format: [chunk_hdr(4): enc_len(2) + plain_len(2) + encrypted_data]...
-         * This is the multi-chunk aggregation format from the sender. */
-        const uint8_t *ptr = enc_payload;
-        size_t remaining = enc_len;
-        uint8_t *dec = c->dec_buf;  /* heap-allocated, not on stack */
+        ikcp_input(c->kcp, (const char *)c->kcp_buf, (long)dec_len);
 
-        while (remaining >= 4) {
-            uint16_t chunk_enc = ((uint16_t)ptr[0] << 8) | ptr[1];
-            uint16_t chunk_plain = ((uint16_t)ptr[2] << 8) | ptr[3];
-            ptr += 4;
-            remaining -= 4;
+        /* Drain BEFORE flushing ACKs so ACK carries true rcv_wnd */
+        bypass_kcp_drain(ctx, c);
 
-            if (chunk_enc == 0 || chunk_enc > remaining)
-                break;
-
-            ssize_t dec_len = bypass_decode(ctx, dec, BYPASS_MAX_PAYLOAD + BYPASS_ENCRYPT_OVERHEAD,
-                                             ptr, chunk_enc, algo_idx);
-            if (dec_len <= 0) {
-                ptr += chunk_enc;
-                remaining -= chunk_enc;
-                continue;
-            }
-
-            /* Clip to declared plain length (belt-and-suspenders with
-             * the 2-byte length prefix inside bypass_decode) */
-            if ((size_t)dec_len > chunk_plain)
-                dec_len = (ssize_t)chunk_plain;
-
-            /* Flush any pending tx_buf first */
-            if (c->tx_buf_len > 0) {
-                ssize_t nf = send(c->local_sock, (const char *)c->tx_buf,
-                                  c->tx_buf_len, MSG_DONTWAIT);
-                if (nf > 0) {
-                    if ((size_t)nf < c->tx_buf_len) {
-                        memmove(c->tx_buf, c->tx_buf + nf,
-                                c->tx_buf_len - (size_t)nf);
-                        c->tx_buf_len -= (size_t)nf;
-                    } else {
-                        c->tx_buf_len = 0;
-                    }
-                    c->rx_bytes += (size_t)nf;
-                    ctx->bp_rx_bytes += (size_t)nf;
-                }
-            }
-
-            /* Write this chunk to local socket */
-            ssize_t sent = send(c->local_sock, (const char *)dec,
-                                (size_t)dec_len, MSG_DONTWAIT);
-            if (sent > 0) {
-                c->rx_bytes += (size_t)sent;
-                ctx->bp_rx_bytes += (size_t)sent;
-                if ((size_t)sent < (size_t)dec_len) {
-                    size_t rem = (size_t)dec_len - (size_t)sent;
-                    if (c->tx_buf_len + rem <= BYPASS_TX_BUF_SIZE) {
-                        memcpy(c->tx_buf + c->tx_buf_len,
-                               dec + sent, rem);
-                        c->tx_buf_len += rem;
-                    }
-                }
-            } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                /* Socket buffer full - buffer and stop processing more chunks */
-                if (c->tx_buf_len + (size_t)dec_len <= BYPASS_TX_BUF_SIZE) {
-                    memcpy(c->tx_buf + c->tx_buf_len,
-                           dec, (size_t)dec_len);
-                    c->tx_buf_len += (size_t)dec_len;
-                }
-                break;
-            }
-
-            ptr += chunk_enc;
-            remaining -= chunk_enc;
-        }
+        ikcp_update(c->kcp, bypass_kcp_time(c));
 
         c->last_active = n2n_now();
-
-        /* Update peer's last_seen to prevent keepalive */
         bypass_conn_update_peer_last_seen(ctx, c);
         return;
     }
@@ -807,6 +860,10 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
          * side to propagate FIN to local app, but keep reading - local
          * app may still have data to send (TCP half-close). */
         c->fin_rcvd = 1;
+
+        /* Drain any remaining data from KCP's receive buffer */
+        if (c->kcp)
+            bypass_kcp_drain(ctx, c);
 
         /* Flush any pending tx_buf before shutting down write side */
         for (int _retry = 0; _retry < 10 && c->tx_buf_len > 0; _retry++) {
@@ -1008,6 +1065,7 @@ int bypass_handle_probe_frame(bypass_context_t *ctx, const uint8_t *frame,
             if (!pe)
                 return 0; /* no slots */
             pe->virt_ip = sender_ip_host;
+            pe->is_lan = bypass_is_lan_peer(ctx, sender_ip_host);
             pe->state_time = n2n_now();
             pe->probe_sent = 0;
             pe->probe_retries = 0;
@@ -1023,7 +1081,6 @@ int bypass_handle_probe_frame(bypass_context_t *ctx, const uint8_t *frame,
             traceEvent(TRACE_INFO, "bypass: received PROBE from %s, CAPABLE",
                        inet_ntoa((struct in_addr){htonl(sender_ip_host)}));
         }
-        pe->wants_bypass = initiator_wants;
         pe->state = BYPASS_PEER_CAPABLE;
 
         /* Respond with PROBE_ACK */
@@ -1073,22 +1130,9 @@ void bypass_start_negotiation(bypass_context_t *ctx, struct peer_info *peer)
 
     bypass_peer_entry_t *pe = bypass_find_peer(ctx, peer->assigned_ip);
     if (pe) {
-        /* Already exists. If ACTIVE, the peer may have restarted with different
-         * bypass settings - remove old iptables rule and re-negotiate so normal
-         * n2n path works during probe. */
-        if (pe->state == BYPASS_PEER_ACTIVE) {
-            bypass_del_peer_rule(ctx, pe->virt_ip);
-            pe->state = BYPASS_PEER_NONE;
-            pe->state_time = 0;
-            pe->probe_sent = 0;
-            pe->probe_retries = 0;
-            pe->wants_bypass = 0;
-            if (ctx->peer_count > 0)
-                ctx->peer_count--;
-            /* Fall through to re-negotiate */
-        } else {
-            return; /* Already negotiating or UNAVAILABLE */
-        }
+        /* Already exists. ACTIVE → nothing to do (bypass_tick keeps
+         * is_lan in sync). Other states → already negotiating. */
+        return;
     }
 
     /* Allocate peer entry (reuse if reset above) */
@@ -1109,6 +1153,7 @@ void bypass_start_negotiation(bypass_context_t *ctx, struct peer_info *peer)
     }
 
     pe->virt_ip = peer->assigned_ip;
+    pe->is_lan = bypass_is_lan_peer(ctx, peer->assigned_ip);
     pe->state = BYPASS_PEER_PROBING;
     pe->state_time = n2n_now();
     pe->probe_sent = 0;
@@ -1145,7 +1190,6 @@ void bypass_peer_gone(bypass_context_t *ctx, uint32_t virt_ip_host)
     pe->state_time = 0;
     pe->probe_sent = 0;
     pe->probe_retries = 0;
-    pe->wants_bypass = 0;
     if (ctx->peer_count > 0)
         ctx->peer_count--;
 }
@@ -1263,18 +1307,50 @@ void bypass_tick(bypass_context_t *ctx, time_t now)
             break;
 
         case BYPASS_PEER_ACTIVE:
-            /* Check if we should remove stale conns */
+            /* Keep is_lan in sync with peer_info: sockets[1] may become
+             * available after initial negotiation (PEER_INFO arrives late).
+             * Once is_lan=1 it stays 1 (LAN never reverts to WAN). */
+            if (!pe->is_lan)
+                pe->is_lan = bypass_is_lan_peer(ctx, pe->virt_ip);
             break;
         }
     }
 
-    /* Timeout stale connections */
+    /* Timeout stale connections + KCP periodic update */
     for (int i = 0; i < BYPASS_MAX_CONNS; i++) {
         struct bypass_conn *c = &ctx->conns[i];
-        if (c->state != BYPASS_CONN_FREE &&
-            now - c->last_active > BYPASS_CONN_TIMEOUT) {
+        if (c->state == BYPASS_CONN_FREE)
+            continue;
+
+        /* KCP periodic update — uses high-res clock, not time_t */
+        if (c->kcp) {
+            /* Flush tx_buf to local socket before drain.
+             * When tx_buf fills up, drain stops and rcv_wnd collapses
+             * to 0, halting the sender. select-driven write handler
+             * may not fire if no new UDP packets arrive (deadlock).
+             * Tick-based flush ensures recovery every ~10ms. */
+            if (c->tx_buf_len > 0) {
+                ssize_t nf = send(c->local_sock, (const char *)c->tx_buf,
+                                  c->tx_buf_len, MSG_DONTWAIT);
+                if (nf > 0) {
+                    c->rx_bytes += (size_t)nf;
+                    ctx->bp_rx_bytes += (size_t)nf;
+                    if ((size_t)nf < c->tx_buf_len) {
+                        memmove(c->tx_buf, c->tx_buf + nf,
+                                c->tx_buf_len - (size_t)nf);
+                        c->tx_buf_len -= (size_t)nf;
+                    } else {
+                        c->tx_buf_len = 0;
+                    }
+                }
+            }
+            /* Drain before update so ACK carries true window */
+            bypass_kcp_drain(ctx, c);
+            ikcp_update(c->kcp, bypass_kcp_time(c));
+        }
+
+        if (now - c->last_active > BYPASS_CONN_TIMEOUT) {
             traceEvent(TRACE_INFO, "bypass: conn %u timed out", c->conn_id);
-            /* Send FIN to peer before closing */
             uint8_t pkt[64];
             bypass_build_header(pkt, ctx->tx_transop_idx, BYPASS_FLAG_FIN, c->conn_id);
             ssize_t enc_len = bypass_encode(ctx, pkt + BYPASS_HEADER_SIZE,

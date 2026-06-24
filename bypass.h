@@ -23,6 +23,8 @@
 #ifndef BYPASS_H
 #define BYPASS_H
 
+#include "ikcp.h"
+
 struct peer_info;  /* forward declaration */
 
 #define BYPASS_MAGIC_0           0xAE
@@ -34,22 +36,34 @@ struct peer_info;  /* forward declaration */
 #define BYPASS_MAX_CONNS         64
 #define BYPASS_MAX_PAYLOAD       32768  /* Per-cycle aggregate from TCP socket. Split into chunks for encryption. */
 #define BYPASS_ENCRYPT_OVERHEAD  64
-/* Max plaintext bytes per encryption chunk. Capped conservatively to keep
- * encrypted UDP packet under ~8KB (~6 IP fragments at 1500 MTU), which
- * matches the proven working throughput behavior. */
-#define BYPASS_MAX_CHUNK         8192
+/* Max plaintext bytes per encryption chunk. Must be large enough for
+ * LAN MTU's max segment (8216 + IKCP_OVERHEAD ≈ 8240). PKT_BUF_SIZE
+ * must accommodate the largest encrypted output. At runtime, WAN mode
+ * limits per-cycle reads to 4096 (small TCP read = small chunk). */
+#define BYPASS_MAX_CHUNK         32768
 #define BYPASS_MAX_PEERS         32
-#define BYPASS_TX_BUF_SIZE       BYPASS_MAX_PAYLOAD  /* send buffer for local_sock overflow */
-/* UDP packet buffer: header + chunk_hdr + encrypted payload (one chunk per packet) */
-#define BYPASS_PKT_BUF_SIZE      (BYPASS_HEADER_SIZE + 4 + BYPASS_MAX_CHUNK + BYPASS_ENCRYPT_OVERHEAD)
+/* Send buffer for local_sock overflow. 1MB prevents rmt_wnd collapse
+ * on high-speed LAN. WAN uses smaller effective burst via read limit. */
+#define BYPASS_TX_BUF_SIZE       (1024 * 1024)  /* 1MB */
+/* UDP packet buffer: header + encrypted KCP segment (one segment per packet) */
+#define BYPASS_PKT_BUF_SIZE      (BYPASS_HEADER_SIZE + BYPASS_MAX_CHUNK + BYPASS_ENCRYPT_OVERHEAD)
+
+/* KCP MTU for LAN vs WAN. LAN uses 16384 — reduces KCP segment count
+ * per TCP read cycle by half vs 8216, improving throughput for
+ * cache-sensitive ciphers (Twofish, AES) with minimal fragmentation
+ * risk on lossless LAN links. WAN uses 1400 to avoid IP fragmentation
+ * on lossy links (1500 MTU, 1 fragment per packet). Both are within
+ * n2n's 16384-byte transform buffer limit. */
+#define KCP_MTU_LAN              8216
+#define KCP_MTU_WAN              1400
 
 /* Flags in bypass header byte [5] */
 #define BYPASS_FLAG_SYN          0x01
-#define BYPASS_FLAG_DATA         0x02
 #define BYPASS_FLAG_FIN          0x04
 #define BYPASS_FLAG_RAW          0x08   /* raw IP frame (ICMP etc.) */
 #define BYPASS_FLAG_TEST         0x10   /* handshake test packet */
 #define BYPASS_FLAG_TEST_ACK     0x20   /* handshake test ack */
+#define BYPASS_FLAG_KCP          0x40   /* KCP reliable transport segment */
 
 /* Ethernet types for bypass probe frames (carried via n2n old path) */
 #define BYPASS_ETYPE_PROBE       0x9001
@@ -92,11 +106,16 @@ struct bypass_conn
     uint8_t  fin_rcvd;          /* 1=remote sent FIN, no more writes to local */
     size_t   tx_bytes;
     size_t   rx_bytes;
+    /* KCP reliable transport (built-in congestion control) */
+    ikcpcb *kcp;                /* NULL until handshake completes */
+    uint8_t *kcp_buf;           /* reassembly buffer */
+    void    *user_data;         /* back-pointer to bypass_context_t */
+    IUINT64  kcp_base;          /* KCP clock base (ms from CLOCK_MONOTONIC at conn init) */
     uint8_t *tx_buf;            /* [BYPASS_TX_BUF_SIZE] pending data to send to local_sock */
     size_t   tx_buf_len;        /* bytes in tx_buf */
     uint8_t *agg_buf;           /* [BYPASS_MAX_PAYLOAD] aggregation buffer for local read */
     uint8_t *pkt_buf;           /* [BYPASS_PKT_BUF_SIZE] encoded packet buffer */
-    uint8_t *dec_buf;           /* [BYPASS_MAX_PAYLOAD + BYPASS_ENCRYPT_OVERHEAD] decode buffer */
+    size_t   max_read_limit;    /* per-cycle TCP read limit: 0=default(BYPASS_MAX_PAYLOAD), 4096=WAN */
 };
 
 typedef struct
@@ -106,7 +125,7 @@ typedef struct
     time_t      state_time;     /* when state was entered */
     uint8_t     probe_sent;     /* PROBING: 1=sent, 0=needs send (or retry) */
     uint8_t     probe_retries;  /* PROBING: total retry count (max 3) */
-    uint8_t     wants_bypass;   /* initiator's bypass preference from PROBE */
+    uint8_t     is_lan;         /* 1=same LAN (determined at peer negotiation, when peer_info is reliable) */
     n2n_sock_t  peer_addr;      /* peer's direct address for sending bypass packets */
 } bypass_peer_entry_t;
 
@@ -136,6 +155,17 @@ typedef struct bypass_context_s
  * Used as a guard in hot paths to skip bypass overhead when not needed. */
 static inline int bypass_has_peers(bypass_context_t *ctx) {
     return ctx && ctx->peer_count > 0;
+}
+
+/* Fast check: whether any connection has an active KCP session.
+ * Used to switch select() timeout from 1s to 10ms for responsive KCP updates. */
+static inline int bypass_has_kcp_conns(bypass_context_t *ctx) {
+    if (!ctx) return 0;
+    for (int i = 0; i < BYPASS_MAX_CONNS; i++) {
+        if (ctx->conns[i].state != BYPASS_CONN_FREE && ctx->conns[i].kcp)
+            return 1;
+    }
+    return 0;
 }
 
 /* ===== Functions ===== */

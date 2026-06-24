@@ -3581,6 +3581,7 @@ process_n2n_packet:
                                 eee->my_public_sock.family == AF_INET &&
                                 pi.sockets[0].family == AF_INET &&
                                 memcmp(eee->my_public_sock.addr.v4, pi.sockets[0].addr.v4, IPV4_SIZE) == 0;
+                pending->p2p_is_lan = same_lan ? 1 : 0;
                 if (same_lan) {
                     n2n_sock_t lan_sock = pi.sockets[1];
                     lan_sock.port = pi.sockets[0].port;
@@ -5076,6 +5077,12 @@ static int run_loop(n2n_edge_t * eee )
         }
 
         wait_time.tv_sec = SOCKET_TIMEOUT_INTERVAL_SECS; wait_time.tv_usec = 0;
+        /* When KCP connections are active, use 10ms select timeout
+         * for responsive KCP updates (ikcp_update every 10ms). */
+        if (bypass_has_kcp_conns(eee->bp)) {
+            wait_time.tv_sec = 0;
+            wait_time.tv_usec = 10000;  /* 10ms */
+        }
 
         rc = select(max_sock+1, &socket_mask, bypass_active ? &bypass_write_mask : NULL, NULL, &wait_time);
         nowTime=n2n_now();

@@ -247,6 +247,7 @@ struct peer_info {
     uint8_t             temp_local_sock_valid; /* 1 if temp_local_sock is valid */
     uint8_t             psp_logged;        /* 1 if PsP message already printed for current state */
     uint8_t             p2p_logged;        /* 1 if P2P direct message already printed for current state */
+    uint8_t             p2p_is_lan;        /* 1=LAN P2P, set by edge.c at REGISTER_SUPER_ACK */
     uint8_t             same_lan_as_sn;    /* 1 if edge is in same LAN as supernode */
 };
 

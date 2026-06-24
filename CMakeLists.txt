@@ -100,6 +100,7 @@ add_library(n2n_core STATIC
         minilzo.c
         upnp.c
         bypass.c
+        ikcp.c
         tuntap_freebsd.c
         tuntap_netbsd.c
         tuntap_linux.c
