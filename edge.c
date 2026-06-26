@@ -655,8 +655,8 @@ static void help() {
     printf("\n");
 
     printf("Usage: edge [config_file] <options>\n");
-    printf("or: edge -a <tun IP address> -c <community> -k <encrypt key> -A <mode> -l <supernode host:port>\n");
     printf("or: edge -c <community> (default: -d n2nx -a 10.64.0.x -l n2n6.ouno.eu.org)\n");
+    printf("or: edge -a <tun IP address> -c <community> -k <encrypt key> -A <mode> -l <supernode host:port>\n");
     printf("\n");
 
     printf("-a <addr>[/<prefixlen>]  | Set interface IP address (IPv4 or IPv6, auto-detected).\n");
@@ -701,7 +701,7 @@ static void help() {
     printf("-E                       | Accept multicast MAC addresses (default: drop).\n");
     printf("-v                       | Make more verbose. Repeat as required.\n");
     printf("-t <port|path>           | Management Socket (UDP Port or absolute path). (default: %d)\n", N2N_EDGE_MGMT_PORT);
-    printf("-x [port]                | Disable bypass (no port). Optionally set bypass port (default: %d)\n", BYPASS_DEFAULT_PORT);
+    printf("-x <port>                | Disable bypass (no port). Optionally set bypass port (default: %d)\n", BYPASS_DEFAULT_PORT);
     printf("-h                       | Show this help message\n");
 
     printf("\nEnvironment variables:\n");
