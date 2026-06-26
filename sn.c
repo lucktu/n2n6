@@ -1979,7 +1979,7 @@ static void help(int argc, char * const argv[])
     printf("\n");
 
     fprintf( stderr, "-l <lport>\tSet UDP main listen port to <lport>\n" );
-    fprintf( stderr, "-L <file> \tEnable traffic stats and rate limiting (config file)\n" );
+    fprintf( stderr, "-L <file> \tTraffic statistics file (config auto-derived as .cfg)\n" );
     fprintf( stderr, "-4|-6     \tIP mode: -4 (IPv4 only), -6 (IPv6 only), both/none (dual-stack)\n" );
  #ifndef _WIN32
     fprintf( stderr, "-t <port>\tSet management UDP port to <port> (default: 5646)\n" );
