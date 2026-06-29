@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -28,79 +29,14 @@
 #include <sys/random.h>
 #include <errno.h>
 #include <fcntl.h>
-#endif
-
-/* ---------- random_bytes: fill buffer with cryptographically secure random bytes ---------- */
-static inline int random_bytes_buf(uint8_t *buf, size_t n) {
-    if (n == 0) return 0;
-
-#if defined(_WIN32)
-    NTSTATUS status = BCryptGenRandom(NULL, buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    return (status == 0) ? 0 : -1;
-
-#elif defined(__linux__)
-    /* Try getrandom() first (Linux 3.17+) */
-    size_t done;
-#if defined(SYS_getrandom)
-    done = 0;
-    while (done < n) {
-        ssize_t ret = syscall(SYS_getrandom, buf + done, n - done, 0);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        done += (size_t)ret;
-    }
-    if (done == n) return 0;
-#endif
-    /* Fallback to /dev/urandom */
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) return -1;
-    done = 0;
-    while (done < n) {
-        ssize_t ret = read(fd, buf + done, n - done);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            return -1;
-        }
-        done += (size_t)ret;
-    }
-    close(fd);
-    return 0;
-
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    /* Try getentropy() first (OpenBSD 5.6+, FreeBSD 12.0+, macOS 10.12+) */
-    size_t done;
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-    done = 0;
-    while (done < n) {
-        size_t chunk = (n - done > 256) ? 256 : (n - done);
-        if (getentropy(buf + done, chunk) != 0) {
-            break;
-        }
-        done += chunk;
-    }
-    if (done == n) return 0;
-#endif
-    /* Fallback to /dev/urandom */
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0) return -1;
-    done = 0;
-    while (done < n) {
-        ssize_t ret = read(fd, buf + done, n - done);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            return -1;
-        }
-        done += (size_t)ret;
-    }
-    close(fd);
-    return 0;
-
 #else
-    /* Unknown platform: try /dev/urandom as last resort */
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#endif
+
+/* Shared fallback: /dev/urandom for any platform */
+static inline int urandom_fallback(uint8_t *buf, size_t n) {
     int fd = open("/dev/urandom", O_RDONLY);
     if (fd < 0) return -1;
     size_t done = 0;
@@ -115,6 +51,50 @@ static inline int random_bytes_buf(uint8_t *buf, size_t n) {
     }
     close(fd);
     return 0;
+}
+
+/* ---------- random_bytes: fill buffer with cryptographically secure random bytes ---------- */
+static inline int random_bytes_buf(uint8_t *buf, size_t n) {
+    if (n == 0) return 0;
+
+#if defined(_WIN32)
+    NTSTATUS status = BCryptGenRandom(NULL, buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return (status == 0) ? 0 : -1;
+
+#elif defined(SYS_getrandom)
+    /* Linux getrandom() (Linux 3.17+) */
+    size_t done = 0;
+    while (done < n) {
+        ssize_t ret = syscall(SYS_getrandom, buf + done, n - done, 0);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        done += (size_t)ret;
+    }
+    if (done == n) return 0;
+    return urandom_fallback(buf + done, n - done);
+
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+    /* macOS/FreeBSD/OpenBSD: getentropy() first */
+    size_t done = 0;
+    while (done < n) {
+        size_t chunk = (n - done > 256) ? 256 : (n - done);
+        if (getentropy(buf + done, chunk) != 0) {
+            break;
+        }
+        done += chunk;
+    }
+    if (done == n) return 0;
+    return urandom_fallback(buf + done, n - done);
+
+#elif defined(__NetBSD__)
+    /* NetBSD: only /dev/urandom */
+    return urandom_fallback(buf, n);
+
+#else
+    /* Unknown platform: try /dev/urandom as last resort */
+    return urandom_fallback(buf, n);
 #endif
 }
 

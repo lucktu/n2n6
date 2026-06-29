@@ -30,8 +30,17 @@ static inline uint64_t bswap_64(uint64_t x) {
 #define htobe16(x) bswap_16(x)
 #define be16toh(x) bswap_16(x)
 
+#elif defined(__APPLE__)
+#include <libkern/OSByteOrder.h>
+#define htole64(x) (x)
+#define le64toh(x) (x)
+#define htole32(x) (x)
+#define le32toh(x) (x)
+#define htobe32(x) OSSwapHostToBigInt32(x)
+#define be32toh(x) OSSwapBigToHostInt32(x)
+#define htobe16(x) OSSwapHostToBigInt16(x)
+#define be16toh(x) OSSwapBigToHostInt16(x)
 #else
-/* Define htole64 and le64toh if not available */
 #include <byteswap.h>
 #ifndef htole64
 # if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__

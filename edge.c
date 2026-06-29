@@ -3683,7 +3683,9 @@ process_n2n_packet:
                         if (!initial_connection_complete && eee->daemon) {
 #ifdef N2N_HAVE_DAEMON
                             useSyslog = 1; /* traceEvent output now goes to syslog. */
+#ifdef __linux__
                             prctl(PR_SET_KEEPCAPS, 1L);
+#endif
                             if ( -1 == daemon( 0, 0 ) ) {
                                 traceEvent( TRACE_ERROR, "Failed to become daemon." );
                                 exit(-5);

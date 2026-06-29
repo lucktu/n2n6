@@ -8,7 +8,7 @@
 #include "speck.h"
 #include <string.h>
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 #include <endian.h>
 #endif
 
