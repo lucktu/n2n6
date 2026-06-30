@@ -1,6 +1,7 @@
 /* Pure C AES implementation for n2n6.
  * Ported from n2n project (ntop.org), plain C path only.
  */
+
 #include "aes.h"
 #include "n2n.h"
 #include <string.h>
@@ -11,8 +12,6 @@
 #define AES128_KEY_BYTES  N2N_AES128_KEY_BYTES
 #define AES192_KEY_BYTES  N2N_AES192_KEY_BYTES
 #define AES256_KEY_BYTES  N2N_AES256_KEY_BYTES
-
-
 
 // rijndael-alg-fst.c version 3.0 (December 2000)
 // optimised ANSI C code for the Rijndael cipher (now AES)

@@ -1,6 +1,7 @@
 /* Pure C AES implementation for n2n6.
  * Ported from n2n project (ntop.org), plain C path only.
  */
+
 #ifndef N2N_AES_H
 #define N2N_AES_H
 

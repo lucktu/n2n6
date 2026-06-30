@@ -12,6 +12,7 @@
 #include "n2n_transforms.h"
 #include "n2n_wire.h"
 #include <fcntl.h>
+#include <signal.h>
 #include <inttypes.h>
 #ifdef _WIN32
 #include <winsock2.h>
@@ -379,6 +380,9 @@ struct n2n_sn
     SOCKET              sock;           /* Main socket for UDP traffic with edges. */
     SOCKET              sock6;
     SOCKET              mgmt_sock;      /* management socket. */
+    SOCKET              ws_listen_sock; /* TCP listen socket for WebSocket (same as lport). */
+#define N2N_SN_MAX_WS 64
+    ws_conn_t           ws_conns[N2N_SN_MAX_WS]; /* WS connection table (edge connected via WS). */
     struct peer_info *  edges;          /* Link list of registered edges. */
     n2n_trans_op_t      transop[N2N_MAX_TRANSFORMS];
     int                 ipv4_available; /* 0=unavailable, 1=available */
@@ -586,6 +590,12 @@ static int init_sn( n2n_sn_t * sss )
     sss->sock = -1;
     sss->sock6 = -1;
     sss->mgmt_sock = -1;
+    sss->ws_listen_sock = -1;
+    {
+        int wi;
+        for (wi = 0; wi < N2N_SN_MAX_WS; wi++)
+            ws_init(&sss->ws_conns[wi]);
+    }
     sss->edges = NULL;
     /* Initialize transforms - required to decode encrypted packets */
     transop_null_init(    &(sss->transop[N2N_TRANSOP_NULL_IDX]) );
@@ -618,6 +628,17 @@ static void deinit_sn( n2n_sn_t * sss )
         closesocket(sss->mgmt_sock);
     }
     sss->mgmt_sock = -1;
+
+    if ( sss->ws_listen_sock >= 0 )
+    {
+        closesocket(sss->ws_listen_sock);
+    }
+    sss->ws_listen_sock = -1;
+    {
+        int wi;
+        for (wi = 0; wi < N2N_SN_MAX_WS; wi++)
+            ws_close(&sss->ws_conns[wi]);
+    }
 
     purge_peer_list( &(sss->edges), 0xffffffff );
 
@@ -1006,6 +1027,120 @@ static int update_edge( n2n_sn_t * sss,
 }
 
 
+/* ============================ WebSocket support ============================ */
+
+/* Create TCP listen socket (same port as UDP), to accept WS edge connections.
+ * Returns fd on success, -1 on failure. */
+static SOCKET open_ws_listen_socket(uint16_t local_port) {
+    SOCKET fd;
+    struct sockaddr_in addr;
+    int reuse = 1;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(local_port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+        traceEvent(TRACE_WARNING, "WS listen bind failed (port %u): %s",
+                   (unsigned)local_port, strerror(errno));
+        closesocket(fd);
+        return -1;
+    }
+    if (listen(fd, 16) == -1) {
+        traceEvent(TRACE_WARNING, "WS listen() failed: %s", strerror(errno));
+        closesocket(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Find a free slot in ws_conns[], return index or -1 */
+static int sn_ws_find_free_slot(n2n_sn_t * sss) {
+    int i;
+    for (i = 0; i < N2N_SN_MAX_WS; i++)
+        if (sss->ws_conns[i].state == WS_FREE || sss->ws_conns[i].state == WS_CLOSED)
+            return i;
+    return -1;
+}
+
+/* Close the specified ws_conn slot and clear all peer_info ws pointers pointing to it.
+ * slot is the index into ws_conns. */
+static void sn_ws_drop_conn(n2n_sn_t * sss, int slot) {
+    ws_conn_t *wc;
+    struct peer_info *scan;
+    if (slot < 0 || slot >= N2N_SN_MAX_WS) return;
+    wc = &sss->ws_conns[slot];
+    if (wc->fd < 0 && wc->state == WS_FREE) return;
+
+    /* Clear peer->ws references to this connection */
+    scan = sss->edges;
+    while (scan) {
+        if (scan->ws == wc) scan->ws = NULL;
+        scan = scan->next;
+    }
+    ws_close(wc);
+    ws_init(wc);  /* recycle as free slot */
+}
+
+/* Send data to a registered edge: if the edge is on WS use ws_send, otherwise UDP.
+ * Returns bytes sent, <0 on failure. */
+static ssize_t sendto_sock(n2n_sn_t * sss,
+                           const n2n_sock_t * sock,
+                           const uint8_t * pktbuf,
+                           size_t pktsize);
+static ssize_t sn_send_to_peer(n2n_sn_t * sss,
+                               struct peer_info * peer,
+                               const uint8_t * pktbuf,
+                               size_t pktsize) {
+    if (peer->ws && peer->ws->state == WS_OPEN) {
+        /* ws_send failure drops only this packet, does not mark CLOSED — connection
+         * liveness is determined by ws_recv, to avoid TCP buffer full (EAGAIN)
+         * incorrectly closing the connection and leaving peer->ws dangling. */
+        return ws_send(peer->ws, pktbuf, pktsize);
+    }
+    /* UDP routing: prefer primary address family, fallback to alternate */
+    {
+        n2n_sock_t *primary = (peer->connect_family == AF_INET6 &&
+                               peer->sock6.family == AF_INET6)
+                              ? &peer->sock6 : &peer->sock;
+        n2n_sock_t *fallback = (primary == &peer->sock6) ? &peer->sock : &peer->sock6;
+        ssize_t r;
+        if (primary->family != 0) {
+            r = sendto_sock(sss, primary, pktbuf, pktsize);
+            if (r == (ssize_t)pktsize) return r;
+        }
+        if (fallback->family != 0)
+            return sendto_sock(sss, fallback, pktbuf, pktsize);
+        return -1;
+    }
+}
+
+/* Purge timed out / closed WS connections. Close if idle for WS_KEEPALIVE_TIMEOUT seconds. */
+#define WS_KEEPALIVE_TIMEOUT 60
+static void sn_ws_purge(n2n_sn_t * sss, time_t now) {
+    int i;
+    for (i = 0; i < N2N_SN_MAX_WS; i++) {
+        ws_conn_t *wc = &sss->ws_conns[i];
+        if (wc->state == WS_OPEN) {
+            if (now - wc->last_seen > WS_KEEPALIVE_TIMEOUT) {
+                traceEvent(TRACE_DEBUG, "WS conn[%d] idle timeout, closing", i);
+                sn_ws_drop_conn(sss, i);
+            }
+        } else if (wc->state == WS_CLOSED) {
+            sn_ws_drop_conn(sss, i);
+        }
+    }
+}
+
+/* ===================================================================== */
+
+
 /** Send a datagram to the destination embodied in a n2n_sock_t.
  *
  *  @return -1 on error otherwise number of bytes sent
@@ -1092,33 +1227,38 @@ static int try_forward( n2n_sn_t * sss,
         ssize_t data_sent_len;
         n2n_sock_t *primary = (scan->connect_family == AF_INET6 && scan->sock6.family == AF_INET6)
                               ? &scan->sock6 : &scan->sock;
-        n2n_sock_t *fallback = (primary == &scan->sock6) ? &scan->sock : &scan->sock6;
 
-        data_sent_len = sendto_sock( sss, primary, pktbuf, pktsize );
-        if (data_sent_len != pktsize && fallback->family != 0)
-            data_sent_len = sendto_sock( sss, fallback, pktbuf, pktsize );
+        /* WS edge goes via ws_send, otherwise UDP primary/fallback address families */
+        data_sent_len = sn_send_to_peer( sss, scan, pktbuf, pktsize );
 
         if ( data_sent_len == pktsize )
         {
             ++(sss->stats.fwd);
-            traceEvent(TRACE_DEBUG, "unicast %lu to [%s] %s",
-                       pktsize,
-                       sock_to_cstr( sockbuf, primary ),
-                       macaddr_str(mac_buf, scan->mac_addr));
-        }
-        else
-        {
-            ++(sss->stats.errors);
-            traceEvent(TRACE_ERROR, "unicast %lu to [%s] %s FAILED (%d: %s)",
+            traceEvent(TRACE_DEBUG, "unicast %lu to [%s] %s%s",
                        pktsize,
                        sock_to_cstr( sockbuf, primary ),
                        macaddr_str(mac_buf, scan->mac_addr),
-#ifdef _WIN32
-                       WSAGetLastError(), "socket error"
-#else
-                       errno, strerror(errno)
-#endif
-                       );
+                       scan->ws ? " (ws)" : "");
+        }
+        else
+        {
+            int err = errno;
+            ++(sss->stats.errors);
+            /* EAGAIN is expected transient packet loss (TCP buffer full), do not spam */
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                traceEvent(TRACE_DEBUG, "unicast %lu to [%s] %s%s EAGAIN (drop)",
+                           pktsize,
+                           sock_to_cstr( sockbuf, primary ),
+                           macaddr_str(mac_buf, scan->mac_addr),
+                           scan->ws ? " (ws)" : "");
+            } else {
+                traceEvent(TRACE_WARNING, "unicast %lu to [%s] %s%s FAILED (%d: %s)",
+                           pktsize,
+                           sock_to_cstr( sockbuf, primary ),
+                           macaddr_str(mac_buf, scan->mac_addr),
+                           scan->ws ? " (ws)" : "",
+                           err, strerror(err));
+            }
         }
     }
     else
@@ -1452,38 +1592,24 @@ static int try_broadcast( n2n_sn_t * sss,
             && (0 != memcmp(srcMac, scan->mac_addr, sizeof(n2n_mac_t)) ) )
         {
             ssize_t data_sent_len;
+            n2n_sock_t *primary = (scan->connect_family == AF_INET6 &&
+                                   scan->sock6.family == AF_INET6)
+                                  ? &scan->sock6 : &scan->sock;
 
-            if (scan->sock.family != 0) {
-                data_sent_len = sendto_sock(sss, &(scan->sock), pktbuf, pktsize);
-                if(data_sent_len != pktsize)
-                {
-                    ++(sss->stats.errors);
-                }
-                else
-                {
-                    ++(sss->stats.broadcast);
-                    traceEvent(TRACE_DEBUG, "multicast %lu to %s %s",
-                               pktsize,
-                               sock_to_cstr( sockbuf, &(scan->sock) ),
-                               macaddr_str( mac_buf, scan->mac_addr));
-                }
-            }
-
-            if (scan->sock6.family != 0)
+            /* WS edge goes via ws_send, otherwise UDP */
+            data_sent_len = sn_send_to_peer(sss, scan, pktbuf, pktsize);
+            if(data_sent_len != (ssize_t)pktsize)
             {
-                data_sent_len = sendto_sock(sss, &(scan->sock6), pktbuf, pktsize);
-                if(data_sent_len != pktsize)
-                {
-                    ++(sss->stats.errors);
-                }
-                else
-                {
-                    ++(sss->stats.broadcast);
-                    traceEvent(TRACE_DEBUG, "multicast %lu to %s %s",
-                               pktsize,
-                               sock_to_cstr( sockbuf, &(scan->sock6) ),
-                               macaddr_str( mac_buf, scan->mac_addr));
-                }
+                ++(sss->stats.errors);
+            }
+            else
+            {
+                ++(sss->stats.broadcast);
+                traceEvent(TRACE_DEBUG, "multicast %lu to %s %s%s",
+                           pktsize,
+                           sock_to_cstr( sockbuf, primary ),
+                           macaddr_str( mac_buf, scan->mac_addr),
+                           scan->ws ? " (ws)" : "");
             }
         }
 
@@ -1501,7 +1627,8 @@ static int process_udp( n2n_sn_t * sss,
 												socklen_t sender_sock_len,
                         const uint8_t * udp_buf,
                         size_t udp_size,
-                        time_t now)
+                        time_t now,
+                        ws_conn_t * ws_sender)
 {
     n2n_common_t        cmn; /* common fields in the packet header */
     size_t              rem;
@@ -1892,19 +2019,29 @@ static int process_udp( n2n_sn_t * sss,
             }
         }
 
+        /* If this REGISTER_SUPER arrived via WS, mark the edge as WS-connected (forwarding uses ws_send) */
+        if (ws_sender) {
+            struct peer_info *edge_peer = find_peer_by_mac(sss->edges, reg.edgeMac);
+            if (edge_peer) edge_peer->ws = ws_sender;
+        }
+
         encode_REGISTER_SUPER_ACK( ackbuf, &encx, &cmn2, &ack );
 
-        /* Select the correct socket based on the address family */
-        SOCKET send_sock = (sender_sock->sa_family == AF_INET6) ? sss->sock6 : sss->sock;
-        socklen_t sock_len = (sender_sock->sa_family == AF_INET6) ?
-                             sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+        /* Reply ACK: WS via ws_send, UDP via sendto */
+        if (ws_sender) {
+            ws_send(ws_sender, ackbuf, encx);
+        } else {
+            SOCKET send_sock = (sender_sock->sa_family == AF_INET6) ? sss->sock6 : sss->sock;
+            socklen_t sock_len = (sender_sock->sa_family == AF_INET6) ?
+                                 sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+            sendto( send_sock, ackbuf, encx, 0,
+                    (struct sockaddr *)sender_sock, sock_len );
+        }
 
-        sendto( send_sock, ackbuf, encx, 0,
-                (struct sockaddr *)sender_sock, sock_len );
-
-        traceEvent( TRACE_DEBUG, "Tx REGISTER_SUPER_ACK for %s %s",
+        traceEvent( TRACE_DEBUG, "Tx REGISTER_SUPER_ACK for %s %s%s",
                     macaddr_str( mac_buf, reg.edgeMac ),
-                    sock_to_cstr( sockbuf, &(ack.sock) ) );
+                    sock_to_cstr( sockbuf, &(ack.sock) ),
+                    ws_sender ? " (ws)" : "" );
 
         /* Push all existing peers only when this is a NEW edge registration */
         if ( is_new_edge )
@@ -1955,11 +2092,19 @@ static int process_udp( n2n_sn_t * sss,
                     strncpy(pi.os_name, p->os_name, sizeof(pi.os_name) - 1);
                     pix = 0;
                     encode_PEER_INFO(pibuf, &pix, &pi_cmn, &pi);
-                    sendto(send_sock, pibuf, pix, 0,
-                           (struct sockaddr *)sender_sock, sock_len);
-                    traceEvent(TRACE_DEBUG, "pushed PEER_INFO %s to new edge %s",
+                    if (ws_sender) {
+                        ws_send(ws_sender, pibuf, pix);
+                    } else {
+                        SOCKET send_sock2 = (sender_sock->sa_family == AF_INET6) ? sss->sock6 : sss->sock;
+                        socklen_t sock_len2 = (sender_sock->sa_family == AF_INET6) ?
+                                     sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+                        sendto(send_sock2, pibuf, pix, 0,
+                               (struct sockaddr *)sender_sock, sock_len2);
+                    }
+                    traceEvent(TRACE_DEBUG, "pushed PEER_INFO %s to new edge %s%s",
                                macaddr_str(mac_buf, p->mac_addr),
-                               macaddr_str(mac_buf2, reg.edgeMac));
+                               macaddr_str(mac_buf2, reg.edgeMac),
+                               ws_sender ? " (ws)" : "");
                 }
                 p = p->next;
             }
@@ -2014,6 +2159,8 @@ int main( int argc, char * const argv[] )
 
     n2n_sn_t sss;
     bool ipv4 = true, ipv6 = true;
+
+    signal(SIGPIPE, SIG_IGN);  /* Prevent SIGPIPE killing process when writing to a closed WS socket */
 
 #ifndef _WIN32
     /* stdout is connected to journald, so don't print data/time */
@@ -2195,6 +2342,15 @@ int main( int argc, char * const argv[] )
     sss.ipv4_available = ipv4_available;
     sss.ipv6_available = ipv6_available;
 
+    /* Create WebSocket TCP listener (same port as UDP, optional - failure is non-fatal) */
+    sss.ws_listen_sock = open_ws_listen_socket(sss.lport);
+    if (sss.ws_listen_sock >= 0) {
+        traceEvent(TRACE_NORMAL, "WebSocket listener ready on port %u (TCP)",
+                   (unsigned)sss.lport);
+    } else {
+        traceEvent(TRACE_WARNING, "WebSocket listener disabled (UDP-only mode)");
+    }
+
     /* Display actual running mode */
     if (ipv4_available && ipv6_available) {
         traceEvent( TRACE_NORMAL, "Supernode running in dual-stack mode (IPv4+IPv6)" );
@@ -2268,6 +2424,22 @@ static int run_loop( n2n_sn_t * sss )
         FD_SET(sss->mgmt_sock, &socket_mask);
         max_sock = max(max_sock, sss->mgmt_sock);
 
+        /* WebSocket: listen socket + all established ws_conns */
+        if (sss->ws_listen_sock >= 0) {
+            FD_SET(sss->ws_listen_sock, &socket_mask);
+            max_sock = max(max_sock, sss->ws_listen_sock);
+        }
+        {
+            int wi;
+            for (wi = 0; wi < N2N_SN_MAX_WS; wi++) {
+                ws_conn_t *wc = &sss->ws_conns[wi];
+                if (wc->state == WS_OPEN && wc->fd >= 0) {
+                    FD_SET(wc->fd, &socket_mask);
+                    max_sock = max(max_sock, wc->fd);
+                }
+            }
+        }
+
         wait_time.tv_sec = 10; /* 10-second timeout */
         wait_time.tv_usec = 0;
 
@@ -2286,7 +2458,7 @@ static int run_loop( n2n_sn_t * sss )
 
                 if (bread > 0) {
                     process_udp( sss, (struct sockaddr*) &udp_sender_sock, udp_sender_len,
-                                pktbuf, bread, now );
+                                pktbuf, bread, now, NULL );
                 }
             }
 
@@ -2299,7 +2471,56 @@ static int run_loop( n2n_sn_t * sss )
 
                 if (bread > 0) {
                     process_udp( sss, (struct sockaddr*) &udp6_sender_sock, udp6_sender_len,
-                                pktbuf, bread, now );
+                                pktbuf, bread, now, NULL );
+                }
+            }
+
+            /* WebSocket: accept new connections */
+            if (sss->ws_listen_sock >= 0 &&
+                FD_ISSET(sss->ws_listen_sock, &socket_mask)) {
+                int slot = sn_ws_find_free_slot(sss);
+                if (slot >= 0) {
+                    ws_conn_t *wc = &sss->ws_conns[slot];
+                    if (ws_server_accept(wc, sss->ws_listen_sock) == 0) {
+                        wc->last_seen = now;
+                        traceEvent(TRACE_NORMAL, "WS edge connected, slot=%d fd=%d",
+                                   slot, (int)wc->fd);
+                    } else {
+                        traceEvent(TRACE_WARNING, "WS handshake failed, slot=%d", slot);
+                        ws_close(wc);
+                        ws_init(wc);
+                    }
+                } else {
+                    /* Table full: accept then immediately close to avoid listen queue buildup */
+                    SOCKET tmp = accept(sss->ws_listen_sock, NULL, NULL);
+                    if (tmp >= 0) closesocket(tmp);
+                    traceEvent(TRACE_WARNING, "WS conn table full, rejecting");
+                }
+            }
+
+            /* WebSocket: process data from connected edges */
+            {
+                int wi;
+                for (wi = 0; wi < N2N_SN_MAX_WS; wi++) {
+                    ws_conn_t *wc = &sss->ws_conns[wi];
+                    if (wc->state != WS_OPEN || wc->fd < 0) continue;
+                    if (!FD_ISSET(wc->fd, &socket_mask)) continue;
+
+                    {
+                        uint8_t wbuf[N2N_SN_PKTBUF_SIZE];
+                        ssize_t n = ws_recv(wc, wbuf, sizeof(wbuf));
+                        if (n > 0) {
+                            wc->last_seen = now;
+                            process_udp(sss,
+                                        (struct sockaddr*)&wc->peer,
+                                        (socklen_t)sizeof(wc->peer),
+                                        wbuf, (size_t)n, now, wc);
+                        } else if (n < 0) {
+                            traceEvent(TRACE_DEBUG, "WS conn[%d] closed by peer", wi);
+                            sn_ws_drop_conn(sss, wi);
+                        }
+                        /* n == 0: no complete frame yet, wait for next select */
+                    }
                 }
             }
 
@@ -2324,6 +2545,7 @@ static int run_loop( n2n_sn_t * sss )
         }
 
         purge_expired_registrations( &(sss->edges) );
+        sn_ws_purge(sss, now);
         if (sss->traffic_stats_enabled) {
             static time_t last_stats_purge = 0;
             purge_expired_community_stats(sss, &last_stats_purge, now);

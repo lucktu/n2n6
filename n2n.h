@@ -172,6 +172,10 @@ typedef struct tuntap_dev {
 #define SOCKET int
 #endif /* #ifndef _WIN32 */
 
+/* WebSocket support (pure C, no external deps).
+ * Include after SOCKET and socket headers are defined. */
+#include "ws.h"
+
 struct tuntap_config {
     /* device configuration */
     char* if_name;
@@ -249,6 +253,8 @@ struct peer_info {
     uint8_t             p2p_logged;        /* 1 if P2P direct message already printed for current state */
     uint8_t             p2p_is_lan;        /* 1=LAN P2P, set by edge.c at REGISTER_SUPER_ACK */
     uint8_t             same_lan_as_sn;    /* 1 if edge is in same LAN as supernode */
+    /* WebSocket: non-NULL means this edge is connected via WS, forwarding uses ws_send instead of UDP sendto */
+    ws_conn_t *         ws;
 };
 
 struct n2n_edge; /* forward declaration, defined below */
@@ -379,6 +385,11 @@ struct n2n_edge
     SOCKET              udp_sock;
     SOCKET              udp_sock6;
     SOCKET              mgmt_sock;
+
+    /* WebSocket client (edge side, -w flag): relay via WS when UDP is blocked, disable P2P */
+    int                 use_ws;
+    ws_conn_t           ws_conn;
+    time_t              ws_last_reconnect;
 
     tuntap_dev          device;
     int                 dyn_ip_mode;

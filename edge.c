@@ -650,6 +650,8 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd );
 
 static void readFromMgmtSocket( n2n_edge_t * eee, int * keep_running );
 
+static void edge_ws_connect( n2n_edge_t * eee );
+
 static void help() {
     print_n2n_version();
     printf("\n");
@@ -703,6 +705,7 @@ static void help() {
     printf("-Q <port>                | Query management port (for standalone use). (default: %d)\n", N2N_EDGE_MGMT_PORT);
     printf("-t <port|path>           | Management Socket (UDP Port or absolute path). (default: %d)\n", N2N_EDGE_MGMT_PORT);
     printf("-x <port>                | Disable bypass (no port). Optionally set bypass port (default: %d)\n", BYPASS_DEFAULT_PORT);
+    printf("-w                       | WebSocket mode: relay via supernode over WS (TCP), disable P2P.\n");
     printf("-h                       | Show this help message\n");
 
     printf("\nEnvironment variables:\n");
@@ -761,6 +764,16 @@ SOCKET sock_for_dest( const n2n_edge_t * eee, const n2n_sock_t * dest )
     return eee->udp_sock;
 }
 
+/* WS mode: use ws_send, otherwise UDP. Send failure drops only this packet. */
+static ssize_t edge_send_to_sn( n2n_edge_t * eee,
+                                const uint8_t * pktbuf, size_t idx )
+{
+    if (eee->use_ws && eee->ws_conn.state == WS_OPEN) {
+        return ws_send(&eee->ws_conn, pktbuf, idx);
+    }
+    return sendto_sock(sock_for_dest(eee, &eee->supernode), pktbuf, idx, &eee->supernode);
+}
+
 /** Send a REGISTER packet to another edge.
  *  If temp_local_sock is provided, use it instead of eee->local_sock in the packet. */
 static void send_register_with_local( n2n_edge_t * eee,
@@ -804,7 +817,6 @@ static void send_register_with_local( n2n_edge_t * eee,
 
     sendto_sock( sock_for_dest(eee, remote_peer), pktbuf, idx, remote_peer );
 }
-
 
 /** Check if two IPv4 sockets are on the same /24 or /16 subnet */
 static int same_subnet(const n2n_sock_t *sock1, const n2n_sock_t *sock2) {
@@ -1079,7 +1091,7 @@ static void send_query_peer( n2n_edge_t * eee, const n2n_mac_t targetMac )
     memcpy(query.targetMac, targetMac,            N2N_MAC_SIZE);
 
     encode_QUERY_PEER(pktbuf, &idx, &cmn, &query);
-    sendto_sock(sock_for_dest(eee, &eee->supernode), pktbuf, idx, &(eee->supernode));
+    edge_send_to_sn(eee, pktbuf, idx);
 }
 
 /** Send a REGISTER_SUPER packet to the current supernode. */
@@ -1126,10 +1138,11 @@ static void send_register_super( n2n_edge_t * eee,
     traceEvent( TRACE_INFO, "send REGISTER_SUPER to %s",
         sock_to_cstr( sockbuf, supernode ) );
 
-    sendto_sock( sock_for_dest(eee, supernode), pktbuf, idx, supernode );
+    edge_send_to_sn(eee, pktbuf, idx);
 
-    /* Also register via alternate address family so supernode knows both our addresses */
-    if (eee->supernode_alt.family != 0) {
+    /* Also register via alternate address family so supernode knows both our addresses.
+     * WS mode only uses a single WS connection, skip alt family registration. */
+    if (!eee->use_ws && eee->supernode_alt.family != 0) {
         SOCKET alt_sock = (eee->supernode_alt.family == AF_INET6) ? eee->udp_sock6 : eee->udp_sock;
         if (alt_sock != -1) {
             traceEvent(TRACE_INFO, "send REGISTER_SUPER (alt) to %s",
@@ -1254,6 +1267,8 @@ static int is_empty_ip_address( const n2n_sock_t * sock );
 static void start_punch( n2n_edge_t * eee, struct peer_info * peer )
 {
     MACSTR_TMP(mac_tmp);
+
+    if (eee->use_ws) return;  /* WS mode: no P2P hole-punching */
 
     if ( peer->punch_failed ) return;           /* already gave up */
     if ( peer->punch_start_time != 0 ) return;  /* already in progress */
@@ -2189,8 +2204,14 @@ static int send_PACKET( n2n_edge_t * eee,
 
     /* Use cached destination if it matches and is still fresh (TTL check).
      * Cache only for P2P direct (never relay). TTL ensures we periodically
-     * re-evaluate via find_peer_destination, keeping NAT changes detected. */
-    if (eee->cached_dst_valid && eee->cached_dst_is_peer &&
+     * re-evaluate via find_peer_destination, keeping NAT changes detected.
+     *
+     * WS mode: completely disable P2P, force relay via supernode. */
+    if (eee->use_ws) {
+        dest = 0;
+        destination = eee->supernode;
+        ++(eee->tx_sup); eee->super_tx_bytes += pktlen;
+    } else if (eee->cached_dst_valid && eee->cached_dst_is_peer &&
         memcmp(eee->cached_dst_mac, dstMac, N2N_MAC_SIZE) == 0 &&
         (now - eee->cached_dst_time) < CACHE_DST_TTL)
     {
@@ -2219,7 +2240,12 @@ static int send_PACKET( n2n_edge_t * eee,
 
     traceEvent( TRACE_DEBUG, "send_PACKET to %s", sock_to_cstr( sockbuf, &destination ) );
 
-    sendto_sock( sock_for_dest(eee, &destination), pktbuf, pktlen, &destination );
+    if (!dest) {
+        /* Relay via supernode: WS mode uses ws_send, otherwise UDP */
+        edge_send_to_sn(eee, pktbuf, pktlen);
+    } else {
+        sendto_sock( sock_for_dest(eee, &destination), pktbuf, pktlen, &destination );
+    }
 
     /* If routing via supernode for a unicast peer, re-register with supernode
      * and query peer's latest address - triggers full reconnect like a restart. */
@@ -3111,6 +3137,20 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
     time_t              now = 0;
 
     size_t              i;
+
+    /* WS mode: read from WebSocket connection, sender is fixed as supernode */
+    if (eee->use_ws && fd == eee->ws_conn.fd && eee->ws_conn.state == WS_OPEN) {
+        recvlen = ws_recv(&eee->ws_conn, udp_buf, sizeof(udp_buf));
+        if (recvlen < 0) {
+            ws_close(&eee->ws_conn);
+            eee->ws_last_reconnect = n2n_now();
+            return;
+        }
+        if (recvlen == 0) return;
+        sender = eee->supernode;
+        orig_sender = &sender;
+        goto process_n2n_packet;
+    }
 
     i = sizeof(sender_sock);
     recvlen = recvfrom(fd, udp_buf, sizeof(udp_buf), 0/*flags*/,
@@ -4660,7 +4700,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
     optarg = NULL;
     while((opt = getopt_long(argc,
         argv,
-        "46K:k:a:bc:Eu:g:m:M:d:l:p:fvhrt:R:A:x::", long_options, NULL
+        "46K:k:a:bc:Eu:g:m:M:d:l:p:fvhrt:R:A:x::w", long_options, NULL
     )) != EOF) {
         switch (opt) {
         case '4':
@@ -4815,6 +4855,10 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
 
         case 'v': /* verbose */
             ++traceLevel;
+            break;
+
+        case 'w': /* WebSocket mode: relay via supernode over WS (TCP), disable P2P */
+            eee.use_ws = 1;
             break;
 
         } /* end switch */
@@ -5039,9 +5083,43 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
 
     setup_upnp(&eee, local_port);
     set_localip(&eee);
+
+    /* WS mode: establish WebSocket connection to supernode (TCP same port) */
+    if (eee.use_ws) {
+        edge_ws_connect(&eee);
+    }
+
     update_supernode_reg(&eee, n2n_now());
 
     return run_loop(&eee);
+}
+
+static void edge_ws_connect(n2n_edge_t *eee) {
+    char ws_host[INET6_ADDRSTRLEN];
+    uint16_t ws_port = eee->supernode.port;
+
+    if (eee->supernode.family == AF_INET6)
+        inet_ntop(AF_INET6, eee->supernode.addr.v6, ws_host, sizeof(ws_host));
+    else if (eee->supernode.family == AF_INET)
+        inet_ntop(AF_INET, eee->supernode.addr.v4, ws_host, sizeof(ws_host));
+    else {
+        traceEvent(TRACE_WARNING, "WS: supernode address not resolved yet, skip");
+        eee->ws_last_reconnect = n2n_now();
+        return;
+    }
+
+    if (eee->ws_conn.state == WS_OPEN) return;
+    if (n2n_now() - eee->ws_last_reconnect < 5 && eee->ws_last_reconnect != 0) return;
+
+    ws_close(&eee->ws_conn);
+    ws_init(&eee->ws_conn);
+    eee->ws_conn.is_client = 1; /* edge side: send with mask */
+    if (ws_connect(&eee->ws_conn, ws_host, ws_port) == 0) {
+        traceEvent(TRACE_NORMAL, "WS connected to %s:%u", ws_host, ws_port);
+    } else {
+        traceEvent(TRACE_INFO, "WS connect to %s:%u failed (will retry)", ws_host, ws_port);
+        eee->ws_last_reconnect = n2n_now();
+    }
 }
 
 static int run_loop(n2n_edge_t * eee )
@@ -5086,6 +5164,12 @@ static int run_loop(n2n_edge_t * eee )
         FD_SET(eee->device.fd, &socket_mask);
         max_sock = max( (int) max_sock, (int) eee->device.fd );
 #endif
+
+        /* WS mode: add WebSocket connection fd to select */
+        if (eee->use_ws && eee->ws_conn.state == WS_OPEN && eee->ws_conn.fd >= 0) {
+            FD_SET(eee->ws_conn.fd, &socket_mask);
+            max_sock = max(max_sock, (int)eee->ws_conn.fd);
+        }
 
         /* Add bypass proxy and connection sockets to select */
         fd_set bypass_write_mask;
@@ -5165,6 +5249,13 @@ static int run_loop(n2n_edge_t * eee )
                     readFromIPSocket(eee, eee->udp_sock6);
             }
 
+            /* WS mode: handle WebSocket fd read */
+            if (eee->use_ws && eee->ws_conn.state == WS_OPEN &&
+                eee->ws_conn.fd >= 0 &&
+                FD_ISSET(eee->ws_conn.fd, &socket_mask)) {
+                readFromIPSocket(eee, eee->ws_conn.fd);
+            }
+
             if(eee->mgmt_sock != -1 && FD_ISSET(eee->mgmt_sock, &socket_mask))
             {
                 readFromMgmtSocket(eee, &keep_running);
@@ -5206,9 +5297,35 @@ static int run_loop(n2n_edge_t * eee )
 
         update_supernode_reg(eee, nowTime);
         PEERS_LOCK(eee);
-        check_punch_timeouts(eee, nowTime);
+        /* WS mode disables P2P hole-punching, forces relay via supernode */
+        if (!eee->use_ws) {
+            check_punch_timeouts(eee, nowTime);
+        }
         PEERS_UNLOCK(eee);
-        
+
+        /* WS reconnection: retry every 5s after disconnect, re-register immediately on reconnect */
+        if (eee->use_ws && eee->ws_conn.state != WS_OPEN) {
+            if (nowTime - eee->ws_last_reconnect >= 5) {
+                edge_ws_connect(eee);
+                if (eee->ws_conn.state == WS_OPEN) {
+                    eee->last_register_req = 0;  /* skip 30s interval, re-register immediately */
+                }
+            }
+        }
+        /* WS heartbeat: send ping every 5s (pong updates last_seen in ws_recv) */
+        if (eee->use_ws && eee->ws_conn.state == WS_OPEN) {
+            if (nowTime - eee->ws_conn.last_seen >= 5) {
+                int pr = ws_ping(&eee->ws_conn);
+                if (pr == -1) {
+                    ws_close(&eee->ws_conn);
+                    eee->ws_last_reconnect = nowTime;
+                } else if (pr == 0) {
+                    eee->ws_conn.last_seen = nowTime;
+                }
+                /* pr == -2: EAGAIN, do not close connection, do not update last_seen, retry next cycle */
+            }
+        }
+
         /* Periodically check if supernode domain resolved to a new address */
         check_supernode_domain_and_update(eee, nowTime);
 
