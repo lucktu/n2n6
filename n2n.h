@@ -339,7 +339,7 @@ size_t clear_peer_list( struct peer_info ** peer_list );
 size_t purge_expired_registrations( struct peer_info ** peer_list );
 
 /* version.c */
-extern char *n2n_sw_version, *n2n_sw_osName, *n2n_sw_buildDate;
+extern char *n2n_sw_version, *n2n_sw_version_full, *n2n_sw_osName, *n2n_sw_buildDate;
 
 /* Full definition of struct n2n_edge - needed by bypass and edge internals */
 #include "n2n_transforms.h"
@@ -380,7 +380,7 @@ struct n2n_edge
     n2n_community_t     community_name_full;  /* full name before truncation for local display */
     char                keyschedule[N2N_PATHNAME_MAXLEN];
     int                 null_transop;
-    char                supernode_version[16];
+    char                supernode_version[32];
 
     SOCKET              udp_sock;
     SOCKET              udp_sock6;

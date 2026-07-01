@@ -657,13 +657,13 @@ static void help() {
     printf("\n");
 
     printf("Usage: edge [config_file] <options>\n");
-    printf("or: edge -c <community> (default: -a 10.64.0.x -l n2n6.ouno.eu.org)\n");
+    printf("or: edge -c <community> (default: -a 10.64.0.x -A4 -l n2n6.ouno.eu.org)\n");
     printf("or: edge -a <tun IP address> -c <community> -k <encrypt key> -A <mode> -l <supernode host:port>\n");
     printf("\n");
 
     printf("-a <addr>[/<prefixlen>]  | Set interface IP address (IPv4 or IPv6, auto-detected).\n");
     printf("                         : for DHCP use '-r -a dhcp:0.0.0.0/0'\n");
-    printf("                         : if not specified, auto-assigns 10.64.0.x from supernode\n");
+    printf("                         : if not specified, auto-assigns 10.64.0.x from supernode.\n");
     printf("-A <mode>                | Encryption:");
     printf(" A1 = disable, A2 = twofish(-k)");
     #ifdef N2N_HAVE_AES
@@ -673,15 +673,15 @@ static void help() {
     printf(", A4 = ChaCha20(-k)");
     #endif
     printf("\n");
-    printf("                         : A5 = Speck(-k). '-A1' can also be used as '-A 1' (default: chacha20)\n");
+    printf("                         : A5 = Speck(-k). '-A1' can also be used as '-A 1' (default: chacha20).\n");
     printf("-c <community>           | N2n community name the edge belongs to.\n");
     printf("-k <encrypt key>         | Encryption key (ASCII, max 32) - also N2N_KEY=<encrypt key>.\n");
-    printf("-l <supernode host:port> | Supernode address Formats (default: n2n6.ouno.eu.org):\n");
-    printf("                         : host:port  - Direct address (e.g. 1.2.3.4:5678)\n");
-    printf("                         : host       - Query DNS TXT record for address (e.g. n2n6.ouno.eu.org)\n");
-    printf("-4/-6                    | Resolve supernode DNS name as IPv4 or IPv6 (default: auto)\n");
+    printf("-l <supernode host:port> | Supernode address Formats:\n");
+    printf("                         : host:port - direct address, common format (e.g. 1.2.3.4:5678)\n");
+    printf("                         : host      - dns txt address (e.g. n2n6.ouno.eu.org, it's default).\n");
+    printf("-4/-6                    | Resolve supernode DNS name as IPv4 or IPv6 (default: auto).\n");
 #if N2N_CAN_NAME_IFACE && !defined(_WIN32)
-    printf("-d <tun device>          | Tun device name\n");
+    printf("-d <tun device>          | Tun device name (optional)\n");
 #elif N2N_CAN_NAME_IFACE && defined(_WIN32)
     printf("-d <tun device>          | Tun device name (optional)\n");
 #endif
@@ -695,18 +695,18 @@ static void help() {
 #endif /* #ifdef N2N_HAVE_DAEMON */
 #ifndef _WIN32
     printf("-m <MAC address>         | Fix MAC address for the TAP interface (otherwise it may be random)\n"
-           "                         : eg. -m 01:02:03:04:05:06\n");
+           "                         : eg. -m 01:02:03:04:05:06.\n");
     printf("-M <mtu>                 | Specify n2n MTU of edge interface (default: %d).\n", DEFAULT_MTU);
 #endif
     printf("-r                       | Enable packet forwarding through n2n community.\n");
-    printf("-R <dest>/<length>,<gw>  | Enable packet forwarding and add a route, IPv4/6 is autodetected\n");
+    printf("-R <dest>/<length>,<gw>  | Enable packet forwarding and add a route, IPv4/6 is autodetected.\n");
     printf("-E                       | Accept multicast MAC addresses (default: drop).\n");
     printf("-v                       | Make more verbose. Repeat as required.\n");
-    printf("-Q <port>                | Query management port (for standalone use). (default: %d)\n", N2N_EDGE_MGMT_PORT);
-    printf("-t <port|path>           | Management Socket (UDP Port or absolute path). (default: %d)\n", N2N_EDGE_MGMT_PORT);
-    printf("-x <port>                | Disable bypass (no port). Optionally set bypass port (default: %d)\n", BYPASS_DEFAULT_PORT);
     printf("-w                       | WebSocket mode: relay via supernode over WS (TCP), disable P2P.\n");
-    printf("-h                       | Show this help message\n");
+    printf("-Q <port>                | Query management port (for standalone use). (default: %d).\n", N2N_EDGE_MGMT_PORT);
+    printf("-t <port|path>           | Management Socket (UDP Port or absolute path). (default: %d).\n", N2N_EDGE_MGMT_PORT);
+    printf("-x <port>                | Disable bypass (no port). Optionally set bypass port (default: %d).\n", BYPASS_DEFAULT_PORT);
+    printf("-h                       | Show this help message.\n");
 
     printf("\nEnvironment variables:\n");
     printf("  N2N_KEY                | Encryption key (ASCII). Not with -K or -k.\n" );
@@ -3743,7 +3743,7 @@ process_n2n_packet:
                         eee->register_lifetime = min( eee->register_lifetime, REGISTER_SUPER_INTERVAL_MAX );
 
                         /* Store supernode version */
-                        strcpy(eee->supernode_version, n2n_sw_version);
+                        strcpy(eee->supernode_version, n2n_sw_version_full);
 
                     } else {
                         /* Duplicate ACK from alt address family: just refresh last_sup */
@@ -4939,7 +4939,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
     }
 
     printf("\n");
-    traceEvent(TRACE_NORMAL, "Starting edge %s", n2n_sw_version);
+    traceEvent(TRACE_NORMAL, "Starting edge %s", n2n_sw_version_full);
 
     for (int i = 0; i < eee.sn_num; ++i) {
         if (strcmp(eee.sn_ip_array[i], "n2n6.ouno.eu.org") == 0) continue;

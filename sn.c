@@ -2123,12 +2123,12 @@ static void help(int argc, char * const argv[])
     printf("Usage: supernode -l <lport>\n");
     printf("\n");
 
-    fprintf( stderr, "-l <lport>\tSet UDP main listen port to <lport>\n" );
-    fprintf( stderr, "-L <file> \tTraffic statistics file (config auto-derived as .cfg)\n" );
-    fprintf( stderr, "-4|-6     \tIP mode: -4 (IPv4 only), -6 (IPv6 only), both/none (dual-stack)\n" );
-    fprintf( stderr, "-Q <port> \tQuery management port (for standalone use). (default: %d)\n", N2N_SN_MGMT_PORT );
+    fprintf( stderr, "-l <lport>\tSet UDP main listen port to <lport>.\n" );
+    fprintf( stderr, "-L <file> \tTraffic statistics file (config auto-derived as .cfg).\n" );
+    fprintf( stderr, "-4|-6     \tIP mode: -4 (IPv4 only), -6 (IPv6 only), both/none (dual-stack).\n" );
+    fprintf( stderr, "-Q <port> \tQuery management port (for standalone use). (default: %d).\n", N2N_SN_MGMT_PORT );
 #ifndef _WIN32
-    fprintf( stderr, "-t <port>\tSet management UDP port to <port> (default: 5646)\n" );
+    fprintf( stderr, "-t <port>\tSet management UDP port to <port> (default: 5646).\n" );
 #endif
 #if defined(N2N_HAVE_DAEMON)
     fprintf( stderr, "-f        \tRun in foreground.\n" );

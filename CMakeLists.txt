@@ -5,7 +5,35 @@ cmake_minimum_required(VERSION 3.7)
 set(N2N_VERSION 2.3_6.3)
 set(N2N_OSNAME ${CMAKE_SYSTEM_NAME})
 
-add_definitions(-DN2N_VERSION=\"${N2N_VERSION}\" -DN2N_OSNAME=\"${N2N_OSNAME}\")
+# Append git revision if available (e.g., 2.3_6.3_r565_976242f)
+execute_process(
+        COMMAND git rev-list --count HEAD
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_REV
+        RESULT_VARIABLE GIT_RESULT
+        ERROR_QUIET
+)
+if (GIT_RESULT EQUAL 0)
+execute_process(
+        COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_ID
+        ERROR_QUIET
+)
+string(REGEX REPLACE "\n$" "" GIT_REV "${GIT_REV}")
+string(REGEX REPLACE "\n$" "" GIT_ID "${GIT_ID}")
+string(STRIP "${GIT_REV}" GIT_REV)
+string(STRIP "${GIT_ID}" GIT_ID)
+set(N2N_VERSION_FULL "${N2N_VERSION}_r${GIT_REV}_${GIT_ID}")
+MESSAGE(STATUS "Build from git rev: ${N2N_VERSION_FULL}")
+else()
+set(N2N_VERSION_FULL "${N2N_VERSION}")
+MESSAGE(STATUS "Git not available, version: ${N2N_VERSION_FULL}")
+endif()
+
+add_definitions(-DN2N_VERSION=\"${N2N_VERSION}\")
+add_definitions(-DN2N_VERSION_FULL=\"${N2N_VERSION_FULL}\")
+add_definitions(-DN2N_OSNAME=\"${N2N_OSNAME}\")
 
 # AES now uses pure C implementation - always enabled, no OpenSSL needed
 add_definitions(-DN2N_HAVE_AES)
