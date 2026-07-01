@@ -31,7 +31,7 @@ set(N2N_VERSION_FULL "${N2N_VERSION}")
 MESSAGE(STATUS "Git not available, version: ${N2N_VERSION_FULL}")
 endif()
 
-include_directories(src)
+include_directories(${PROJECT_SOURCE_DIR} src)
 
 add_definitions(-DN2N_VERSION=\"${N2N_VERSION}\")
 add_definitions(-DN2N_VERSION_FULL=\"${N2N_VERSION_FULL}\")

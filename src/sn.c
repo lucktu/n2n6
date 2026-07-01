@@ -2164,7 +2164,9 @@ int main( int argc, char * const argv[] )
     n2n_sn_t sss;
     bool ipv4 = true, ipv6 = true;
 
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);  /* Prevent SIGPIPE killing process when writing to a closed WS socket */
+#endif
 
 #ifndef _WIN32
     /* stdout is connected to journald, so don't print data/time */

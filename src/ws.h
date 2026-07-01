@@ -26,10 +26,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* SOCKET is already defined in n2n.h (non-Windows: #define SOCKET int; Windows: winsock2.h) */
-#ifndef SOCKET
-typedef int SOCKET;
-#endif
+/* SOCKET type is provided by n2n.h (non-Windows: #define SOCKET int; Windows: from winsock2.h) */
+#include "n2n.h"
 
 /* WS connection state */
 typedef enum {
