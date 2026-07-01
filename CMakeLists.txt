@@ -2,7 +2,7 @@ project(n2n C)
 cmake_minimum_required(VERSION 3.7)
 
 # N2n information
-set(N2N_VERSION 2.3_6.3)
+set(N2N_VERSION 2.3_6.4)
 set(N2N_OSNAME ${CMAKE_SYSTEM_NAME})
 
 # Append git revision if available (e.g., 2.3_6.3_r565_976242f)
