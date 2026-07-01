@@ -2025,7 +2025,11 @@ static int process_udp( n2n_sn_t * sss,
             if (edge_peer) edge_peer->ws = ws_sender;
         }
 
+        /* Fill sn_version so edge can display supernode version */
+        strncpy(ack.sn_version, n2n_sw_version_full, sizeof(ack.sn_version));
+
         encode_REGISTER_SUPER_ACK( ackbuf, &encx, &cmn2, &ack );
+
 
         /* Reply ACK: WS via ws_send, UDP via sendto */
         if (ws_sender) {

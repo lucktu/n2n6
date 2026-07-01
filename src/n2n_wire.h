@@ -197,6 +197,7 @@ struct n2n_REGISTER_SUPER_ACK
     /* Appended after sn_bak for forward/backward compatibility.
      * Old edges ignore extra bytes; old supernodes leave sn_caps=0 (unknown). */
     uint8_t             sn_caps;        /* N2N_SN_CAPS_* bitmask: supernode IP capability */
+    char                sn_version[24]; /* Supernode version string (e.g., "2.3_6.3_r239_483723e") */
 };
 
 typedef struct n2n_REGISTER_SUPER_ACK n2n_REGISTER_SUPER_ACK_t;

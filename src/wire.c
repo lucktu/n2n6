@@ -432,6 +432,9 @@ size_t encode_REGISTER_SUPER_ACK( uint8_t * base,
     /* Append sn_caps after existing fields for backward compatibility.
      * Old edges will simply ignore this extra byte. */
     retval += encode_uint8( base, idx, reg->sn_caps );
+    /* Append sn_version for supernode version display.
+     * Old edges will simply ignore these extra bytes. */
+    retval += encode_buf( base, idx, reg->sn_version, 24 );
     return retval;
 }
 
@@ -466,6 +469,12 @@ size_t decode_REGISTER_SUPER_ACK( n2n_REGISTER_SUPER_ACK_t * reg,
     if ( *rem >= 1 )
     {
         retval += decode_uint8( &(reg->sn_caps), base, rem, idx );
+    }
+    /* sn_version: optional 24 bytes appended by new supernodes.
+     * If not present (old supernode), sn_version stays empty. */
+    if ( *rem >= 24 )
+    {
+        retval += decode_buf( reg->sn_version, 24, base, rem, idx );
     }
 
     return retval;

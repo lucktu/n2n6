@@ -3742,8 +3742,13 @@ process_n2n_packet:
                         eee->register_lifetime = max( eee->register_lifetime, REGISTER_SUPER_INTERVAL_MIN );
                         eee->register_lifetime = min( eee->register_lifetime, REGISTER_SUPER_INTERVAL_MAX );
 
-                        /* Store supernode version */
-                        strcpy(eee->supernode_version, n2n_sw_version_full);
+                        /* Store supernode version (reported by SN in REGISTER_SUPER_ACK) */
+                        if (ra.sn_version[0] != '\0') {
+                            strncpy(eee->supernode_version, ra.sn_version, sizeof(eee->supernode_version) - 1);
+                            eee->supernode_version[sizeof(eee->supernode_version) - 1] = '\0';
+                        } else {
+                            strcpy(eee->supernode_version, "unknown");
+                        }
 
                     } else {
                         /* Duplicate ACK from alt address family: just refresh last_sup */
