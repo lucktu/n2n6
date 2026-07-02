@@ -1,138 +1,94 @@
+# n2n6 - A Peer-to-Peer VPN
 
+[English](README.md) | [中文版](README.zh.md)
 
-# Edge node
+---
 
-You need to start an edge node on each host you want to connect with the *same*
-community.
+n2n6 is forked from [mxre's n2n](https://github.com/mxre/n2n), adding STUN hole-punching, bypass proxy, WebSocket transport, traffic statistics and control, optimized transfer speed, and simplified usage.
 
-Become root
-```
-./edge -f -d n2n0 -c mynetwork -u 99 -g 99 -k encryptme -m 00:FF:12:34:56:78 -a 192.168.254.1 -s 255.255.255.0 -l a.b.c.d:xyw
-```
-or
-```
-N2N_KEY=encryptme ./edge -f -d n2n0 -c mynetwork -u 99 -g 99 -m 00:FF:12:34:56:78 -a 192.168.254.1 -s 255.255.255.0 -l a.b.c.d:xyw
-```
+### Quick Start
 
-Once you have this worked out, you can drop the `-f` option to make edge detach
-and run as a daemon.
+**Supernode server (support for IPv4/IPv6 dual-stack is required)**
 
-Note that `-u`, `-g` and `-f` options are not available for Windows.
-
-When running edge on Windows a compatile TAP network interface is required, the driver is included in the
-[OpenVPN installer](https://openvpn.net/index.php/open-source/downloads.html). If multiple TAP adapters
-exist in the system one can be specified using the `-d` parameter and the "Friendly Name" of the adapter
-(the one shown in the Network Adapter List in the Control Pannel). If the name containes spaces be sure to use quotation marks around it.
-
-# Supernode
-
-You need to start the supernode once, it does not require any privileges.
-
-1. `./supernode -l 1234 -v -f`
-
-# IPv6 Support
-
-This version of edge and supernode support transport inbetween over IPv6.
-
-Start supernode either in IPv6 or IPv4 and IPv6 mode, by specifing `-6` or `-4` and `-6` switches.
-
-```
-./supernode -6 -f
-```
-or
-```
-./supernode -4 -6 -f
+```bash
+supernode -l 1234
 ```
 
-The default setting is to launch supernode in IPv4 only mode.
+**Edge node 1**
 
-To use IPv6 with edge only the address needs to be specified for
-the supernode.
-
-```
-./edge -f -v [ other options ] -l [2001:aa00:bb00::1]:1234
+```bash
+edge -a 10.64.0.2 -c mynetwork -k secret -A4 -l supernode.example.com:1234
 ```
 
-If DNS name resolution is required, then use the `-6` parameter,
-to force a IPv6 address to be resolved.
+**Edge node 2**
 
-```
-./edge -f -v [ other options ] -6 -l example.com:1234
-```
-
-
-# IPv6 Support (Inner)
-
-n2n supports the carriage of IPv6 packets within the n2n tunnel.
-
-```
-./edge -f -v [ other options ] -a 192.168.254.1 -s 255.255.255.0 -A fdf0:aa01:bb02::1/64
+```bash
+edge -a 10.64.0.3 -c mynetwork -k secret -A4 -l supernode.example.com:1234
 ```
 
-# Considerations of running edge as system service
+That's it — node 1 and node 2 can now communicate.
+By default, P2P direct connection is preferred; if that fails, traffic automatically falls back to relay through the supernode.
+If UDP is blocked on your network, add `-w` to enable WebSocket relay.
 
-## Use net_admin capabilities (LINUX)
+### Key Features
 
-This version of edge is capabilties aware and uses the `NET_ADMIN` capability if it is found
-in its permissive set.
+| Feature | Description |
+|---|---|
+| **WebSocket mode** (`-w`) | Connect via supernode over TCP/WS, bypass NAT |
+| **Multiple ciphers** | `-A1` (none), `-A2` (Twofish), `-A3` (AES), `-A4` (ChaCha20), `-A5` (Speck) |
+| **Peer-to-Peer** | Direct connection after hole-punching (default) |
+| **IPv4/IPv6 dual stack** | Transport and inner addressing |
+| **Auto IP assignment** | Per-community IP pool (10.64.0.x), no DHCP needed |
+| **Packet forwarding** (`-r`) | Route traffic through the n2n community |
+| **Traffic stats & rate limiting** (`-L`) | Supernode per-community 24h/30d stats |
 
-To use this feature set as root the admin capability:
+### Management Interface
+
+**Edge** (default port 5664)
+
+```bash
+edge -Q 5664 # or nc -u 127.0.0.1 5664
 ```
-setcap cap_net_admin+p ./edge
+
+**Supernode** (default port 5646)
+
+```bash
+supernode -Q 5646 # or nc -u 127.0.0.1 5646
 ```
 
-Edge can now be run as any user that has executive permission for edge.
+### Build from Source
 
+```bash
+git clone https://github.com/lucktu/n2n6.git
+cd n2n6 && mkdir build && cd build
+cmake -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release ../
+make
+sudo make install
+```
 
-## Running As a Daemon (UNIX)
+### Platform Notes
 
-Unless given `-f` as a command line option, edge will call `daemon(3)` after
-successful setup. This causes the process to fork a child which closes `stdin`,
-`stdout` and `stderr` then sets itself as process group leader. When this is done,
-the edge command returns immediately and you will only see the edge process in
-the process listings, eg. from `ps` or `top`.
+**Linux**
+- Drop privileges with `-u <uid>` `-g <gid>`
+- Systemd service examples in `packages/systemd/`
+- Foreground: `-f`; daemon logs go to syslog
 
-If the edge command returns 0 then the daemon started successfully. If it
-returns non-zero then edge failed to start up for some reason. When edge starts
-running as a daemon, all logging goes to syslog `daemon.info` facility.
+**Windows**
+- Requires [OpenVPN TAP driver](https://openvpn.net/index.php/open-source/downloads.html)
 
+**macOS**
+- Uses built-in utun interface, no extra TAP driver needed
+- `setcap` not supported on macOS; requires root
 
-## Dropping Root Privileges and SUID-Root Executables (UNIX)
+**Android**
+- Port available from [lmq8267's hin2n](https://github.com/lmq8267/hin2n-Redir)
 
-The edge node uses superuser privileges to create a TAP network interface
-device. Once this is created root privileges are not required and can constitute
-a security hazard if there is some way for an attacker to take control of an
-edge process while it is running. Edge will drop to a non-privileged user if you
-specify the `-u <uid>` and `-g <gid>` options. These are numeric IDs. Consult `/etc/passwd`.
+### Documentation
 
-You may choose to install edge SUID-root to do this:
+- Man pages: `doc/edge.8`, `doc/supernode.1`, `doc/n2n_v2.7`
+- Changelog: `NEW_FEATURES.md`
 
-1. Become root
-2. `chown root:root edge`
-3. `chmod +s edge`
+### Related
 
-Any user can now run edge. You may not want this, but it may be convenient and
-safe if your host has only one login user.
-
-## Systemd Service (LINUX)
-
-Examples for an systemd service file are provided in the packages/systemd/ folder.
-The edge service uses AmbientCapabilities to set the net_admin capability
-to run edge as a dynamically created user.
-
-Systemd requires a Linux Kernel 4.3 or greater for this feature.
-
-
-## SCM Service (WINDOWS)
-
-edge and supernode can be installed as a Windows SCM service, consult the [`win32/install.ps1`](win32/install.ps1)
-script in the repository.
-
-When running as a service, edge and supernode are not attached to
-a console, messages are logged in the Windows Event Log.
-
-The commandline parameters are stored in `HKLM:\SOFTWARE\n2n\edge\Arguments` and `HKLM:\SOFTWARE\n2n\supernode\Arguments`.
-They can be modified using `regedit` or an administrative PowerShell Console. Both entries are *MulitStrings*, so that parameters
-containing spaces can properly supported but if this is not needed the registry entries can be of type *String* too.
-
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/lucktu/n2n6)
+- [mxre/n2n](https://github.com/mxre/n2n) - Upstream
+- [ntop/n2n](https://github.com/ntop/n2n) - Official n2n project

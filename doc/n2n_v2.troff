@@ -1,4 +1,4 @@
-.TH "n2n_v2" 7 "Sep 21, 2009" "revision 3909" "Background"
+.TH "n2n_v2" 7 "Jun 30 2026" "n2n6-2.3_6.4" "Background"
 .SH NAME
 N2n Version 2 \- version 2 of the n2n decentralised peer-to-peer network overlay
 VPN.
@@ -42,18 +42,12 @@ Twofish AES candidate.
 .TP
 .B (3) AES-CBC
 AES in CBC mode with 256-bit key.
-.P
-The following additional ciphers are specified but not yet implemented:
 .TP
-.B (4) LZO
-LZO compression of data (no encryption).
+.B (4) ChaCha20
+ChaCha20 stream cipher (n2n6).
 .TP
-.B (5) TF-LZO
-TF cipher with LZO compression of data prior to encryption.
-.TP
-.B (6) AES-CBC-LZO
-AES-CBC ciper with LZO compression of data prior to encryption.
-
+.B (5) Speck
+Speck lightweight block cipher (n2n6).
 .SH EXTENSIBILITY
 N2n-2 decouples the data transform system from the core of the edge
 operation. This allows for easier addition of new data transform
@@ -95,7 +89,7 @@ The supernode and edge use daemon mode of operation by default. This sense is
 inverted from n2n-1 where they ran in the foreground by default. They can be
 made to run in the foreground so tools such a DJB's daemontools can work with
 them. See the 
-.B -f
+.B \-f
 option
 
 .SH MANAGEMENT CONSOLE
@@ -107,10 +101,11 @@ are running. Statistics can be retrieved and commands issued. The netcat utility
 is all that is required; but more sophisticated tools could be built on the
 interface.
 
-.SH SUPERNODE AUTHENTICATION
-.B (To be implemented)
-Space has been reserved in the supernode registration messages for an
-authentication mechanism.
+.SH WEB SOCKET MODE (n2n6)
+n2n6 adds a WebSocket transport mode (\-w flag on edge). In this mode, edge
+connects to the supernode via TCP/WS and all traffic is relayed. This bypasses
+NAT/firewall restrictions that block UDP. The supernode does not need special
+configuration for WebSocket mode; the edge initiates the WS upgrade.
 
 .SH MESSAGE SUMMARY
 The following message types work within n2n-2.
@@ -121,7 +116,7 @@ Sent from an edge to its local supernode to register its MAC with the community.
 REGISTER_SUPER_ACK
 Sent from a supernode to an edge to confirm registration. This also carries the
 definition of the edge socket as seen at the supernode so NAT can be detected
-and described.
+and described. In n2n6, also carries the supernode version string.
 .TP
 REGISTER_SUPER_NAK
 Supernode refusing to register an edge.
@@ -144,7 +139,7 @@ Federated supernodes exchanging community information.
 .SH OTHER DIFFERENCES
 .TP 
 HTTP Tunneling
-This experimental feature (-t option in n2n_v1) of n2n_v1 has been removed
+This experimental feature (\-t option in n2n_v1) of n2n_v1 has been removed
 entirely from n2n_v2.
 .SH AUTHORS
 .TP
@@ -152,5 +147,8 @@ Richard Andrews andrews (at) ntop.org - main author of n2n-2
 .TP
 Luca Deri
 deri (at) ntop.org - code inherited from n2n-1
+.TP
+lucktu
+n2n6 fork maintainer
 .SH SEE ALSO
 edge(8) supernode(1)

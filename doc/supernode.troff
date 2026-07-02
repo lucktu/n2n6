@@ -1,8 +1,8 @@
-.TH supernode 1  "May 19 2018" "n2n-2.2" "USER COMMANDS"
+.TH supernode 1  "Jun 30 2026" "n2n6-2.3_6.4" "USER COMMANDS"
 .SH NAME
 supernode \- n2n supernode daemon
 .SH SYNOPSIS
-.B supernode [\-l <port>] [\-v] [\-4] [\-6]
+.B supernode [\-l <port>] [\-v] [\-4] [\-6] [\-L <file>] [\-Q <port>]
 .SH DESCRIPTION
 N2N is a peer-to-peer VPN system. Supernode is a node introduction registry,
 broadcast conduit and packet relay node for the n2n system. On startup supernode
@@ -19,7 +19,7 @@ All logging goes to stdout.
 .SH OPTIONS
 .TP
 \-l <port>
-listen on the given UDP port. Defaults to 7654
+listen on the given UDP port. Defaults to 1234
 .TP
 \-4
 bind to the any interface IPv4 address. This is the default.
@@ -28,27 +28,42 @@ bind to the any interface IPv4 address. This is the default.
 bind to the any interface IPv6 address. This disables IPv4 but it can be combined with
 the \-4 switch to allow IPv4 and IPv6 traffic.
 .TP
+\-L <file>
+enable per-community traffic statistics and rate limiting.
+Stats are saved to <file>; configuration is auto-derived as <file>.cfg.
+.TP
+\-Q <port>
+set the query management UDP port (standalone mode). Default 5646.
+.TP
+\-t <port>
+set the management UDP port. Default 5646.
+.TP
 \-v
-use verbose logging
+use verbose logging (repeat for more verbosity)
 .TP
 \-f
 disable daemon mode (UNIX) and run in foreground.
 .SH EXAMPLES
 .TP
-.B supernode -l 7654 -v
-Start supernode listening on UDP port 7654 with verbose output.
+.B supernode -l 1234 -v
+Start supernode listening on UDP port 1234 with verbose output.
 .PP
-.SH REMARKS  
-Additionally supernode opens UDP port 5645 on the IPv4 loopback interface (127.0.0.1)  
-by default. The management port can be changed with the -t option. On this management  
-socket statistical information can be queried, i.e. using .B socat(1). 
+.B supernode -l 1234 -L /var/log/n2n/stats.dat
+Start supernode with traffic statistics tracking.
+.SH REMARKS
+Additionally supernode opens UDP port 5646 on the IPv4 loopback interface (127.0.0.1)
+by default for management queries. The management port can be changed with the \-t or \-Q option.
+.PP
+When the \-L option is used, supernode tracks per-community traffic in a
+sliding 24-hour window (1-minute buckets) and 30-day window (1-day buckets).
+Rate limiting can be configured in the <file>.cfg configuration file.
 .SH RESTART
 When supernode restarts it loses all registration information from associated
-edge nodes. It can take up to five minutes for the edge nodes to re-register and
+edge nodes. It can take up to a few minutes for the edge nodes to re-register and
 normal traffic flow to resume.
 .SH EXIT STATUS
 supernode is a daemon and any exit is an error
 .SH AUTHOR
-Luca Deri ( deri (at) ntop.org ), Richard Andrews ( andrews (at) ntop.org ), Don Bindner, Max Resch
+Luca Deri ( deri (at) ntop.org ), Richard Andrews ( andrews (at) ntop.org ), Don Bindner, Max Resch, lucktu
 .SH SEE ALSO
 edge(8) n2n(7)

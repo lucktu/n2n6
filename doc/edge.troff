@@ -1,11 +1,11 @@
-.TH edge 8  "May 19 2018" "n2n-2.2" "SUPERUSER COMMANDS"
+.TH edge 8  "Jun 30 2026" "n2n6-2.3_6.4" "SUPERUSER COMMANDS"
 .SH NAME
 edge \- n2n edge node daemon
 .SH SYNOPSIS
 .B edge
-[\-d <tun device>] \-a <tun IP address> [\-A <tun IPv6 address>] \-c <community> {\-k <encrypt key>|\-K <keyfile>}
+[\-d <tun device>] \-a <tun IP address> \-c <community> {\-k <encrypt key>|\-K <keyfile>}
 [\-s <netmask>] [\-4|\-6] \-l <supernode>
-[\-p <local port>] [\-u <UID>] [\-g <GID>] [-f] [\-m <MAC address>] [\-E] [\-r] [\-v]
+[\-p <local port>] [\-u <UID>] [\-g <GID>] [\-f] [\-m <MAC address>] [\-E] [\-r] [\-v] [\-w] [\-A <mode>] [\-M <mtu>]
 .SH DESCRIPTION
 N2N is a peer-to-peer VPN system. Edge is the edge node daemon for n2n which
 creates a TAP interface to expose the n2n virtual LAN. On startup n2n creates
@@ -17,18 +17,11 @@ begin to find other nodes in the community.
 \-d <name>
 sets the TAP interface name. Only available on Linux.
 .TP
-\-a {<addr>|static:<addr>|dhcp:0.0.0.0}
-sets the n2n virtual LAN IP address. This is a private IP
-address. All IP addresses in an n2n community typical belong to the same /24
-network (ie. only the last octet of the IP addresses varies). If DHCP is used to
-assign interface addresses then specify the address as
-.B -a dhcp:0.0.0.0
-.TP
-\-A <addr>[/<prefix>]
-set the n2n virtual LAN IPv6 address. Works only in conjunction with a set IPv4 address.
-The default is no set IPv6. The default prefix for an address is /64 but this can be changed
-by appending a prefix to the address.
-.B -A fdf0:dead:beef::102/48
+\-a {<addr>[/<prefix>]|dhcp:0.0.0.0}
+sets the n2n virtual LAN IP address. Supports both IPv4 and IPv6. If not
+specified, auto-assigns an IP from the community pool (10.64.0.x).
+If DHCP is used to assign interface addresses then specify the address as
+.B \-a dhcp:0.0.0.0
 .TP
 \-c <community>
 sets the n2n community name. All edges within the same community appear on the
@@ -39,43 +32,42 @@ truncated to take the first 16 bytes.
 \-h
 write usage then exit.
 .TP
-.B -B <encryption mode>
-Encryption mode selection: B0 = keyfile(-K), B1 = disable, B2 = twofish(-k), B3 = AES-CBC(-k), B5 = Speck(-k)
+.B \-A <mode>
+Encryption mode selection:
+A1 = disable, A2 = twofish(\-k), A3 = AES-CBC(\-k), A4 = ChaCha20(\-k) (default), A5 = Speck(\-k).
 .TP
-.B -k <keystring>
+.B \-k <keystring>
 sets the encryption key from ASCII text (see also N2N_KEY in
-ENVIRONMENT). Used with B2 or B3 modes. All edges communicating must use the same key and community
-name. Not with -K.
+ENVIRONMENT). All edges communicating must use the same key and community
+name. Not with \-K.
 .TP
-.B -K <keyfile>
-Reads a key-schedule file <keyfile>. Used with B0 mode.
+.B \-K <keyfile>
+Reads a key-schedule file <keyfile>.
 .TP
 \-l <addr>:<port>
 sets the n2n supernode IP address and port to register to. Up to 2 supernodes
-can be specified by two invocations of -l <addr>:<port>. Also IPv6 addresses are
-possible, they have to be enclosed in square brackets, if the port is ommited the
-default 7654 is assumed.
+can be specified by two invocations of \-l <addr>:<port>. Also IPv6 addresses are
+possible, they have to be enclosed in square brackets.
 
-.B edge -l 203.0.113.21 -l [2001:db8:cafe:babe::fed0]:7654
+.B edge \-l 203.0.113.21:1234 \-l [2001:db8:cafe:babe::fed0]:1234
 
-If a DNS name is provided it is resolved. Provide the \-b switch
-to periodically lookup the name, incase of a dynamic IP.
+If a DNS name is provided it is resolved.
 .TP
 [\-4|\-6]
-limit resolving the supernode DNS name provided with \-k to either
-IPv4 or IPv6. If the supernode is provied using an numeric address,
-this parameter does nothing. The default is to not specify any protocol
+limit resolving the supernode DNS name to either
+IPv4 or IPv6. The default is to not specify any protocol
 preference.
 .TP
 \-p <num>
-binds edge to the given UDP port. Useful for keeping the same external socket
-across restarts of edge. This allows peer edges which know the edge socket to
-continue p2p operation without going back to the supernode.
+binds edge to the given local UDP port. Useful for keeping the same external socket
+across restarts of edge.
 .TP
-\-t <num>
-binds the edge management system to the given UDP port. Default 5644. Use this
-if you need to run multiple instance of edge; or something is bound to that
-port.
+\-t <port|path>
+sets the management socket to the given UDP port or Unix socket path.
+Default 5664.
+.TP
+\-Q <port>
+sets the query management port (standalone mode). Default 5664.
 .TP
 \-u <uid>
 causes the edge process to drop to the given user ID when privileges are no
@@ -90,32 +82,30 @@ disables daemon mode (UNIX) and causes edge to run in the foreground.
 .TP
 \-m <MAC>
 start the TAP interface with the given MAC address. This is highly recommended
-as it means the same address will be used if edge stops and restarts. If this is
-not done, the ARP caches of all peers will be wrong and packets will not flow to
-this edge until the next ARP refresh.
+as it means the same address will be used if edge stops and restarts.
 .TP
 \-M <MTU>
-set the MTU of the edge interface in bytes. MTU is the largest packet fragment
-size allowed to be moved throught the interface. The default is 1400.
+set the MTU of the edge interface in bytes. The default is 1400.
 .TP
 \-s <netmask>
 set the netmask of edge interface in IPv4 dotted decimal notation. The default
 is 255.255.255.0 (ie. /24).
 .TP
 \-r
-enable IP packet forwarding/routing through the n2n virtual LAN. Without this
-option, IP packets arriving over n2n are dropped if not for the -a <addr> (or
-DHCP assigned) IP address of the edge interface.
+enable IP packet forwarding/routing through the n2n virtual LAN.
+.TP
+\-R <dest>/<length>,<gw>
+Enable packet forwarding and add a route. IPv4/6 is autodetected.
 .TP
 \-E
-accept packets destined for multicast ethernet MAC addresses. These addresses
-are used in multicast ethernet. If this option is not present these multicast
-packets are discarded as most users do not need or
-understand them.
-
-ARP requests and IPv6 neighborhood discovery are not limited by this switch,
-these packages are always sent, as they are required for the clients to
-discover each other.
+accept packets destined for multicast ethernet MAC addresses.
+.TP
+\-w
+WebSocket mode: relay all traffic through the supernode via TCP/WS.
+Disables P2P direct connection. Useful when UDP is blocked.
+.TP
+\-x <port>
+Disable bypass proxy. Optionally set bypass port (default port if not specified).
 .TP
 \-v
 more verbose logging (may be specified several times for more verbosity).
@@ -125,24 +115,22 @@ more verbose logging (may be specified several times for more verbosity).
 set the encryption key so it is not visible on the command line
 .SH EXAMPLES
 .TP
-.B edge -f -d n2n0 -c mynetwork -k encryptme -u 99 -g 99 -m 00:DE:AD:BE:EF:01 -a 192.168.254.7 -l 123.121.120.119:7654
+.B edge \-f \-d n2n0 \-c mynetwork \-k encryptme \-u 99 \-g 99 \-m 00:DE:AD:BE:EF:01 \-a 192.168.254.7 \-l 123.121.120.119:1234
 
-Start edge with TAP device n2n0 on community "mynetwork" with community
-supernode at 123.121.120.119 UDP port 7654 and bind the locally used UDP port to
-50001. Use "encryptme" as the single permanent shared encryption key. Assign MAC
-address 00:DE:AD:BE:EF:01 to the n2n interface and drop to user=99 and group=99
-after the TAP device is successfull configured.
+Start edge with TAP device n2n0 on community "mynetwork" with supernode
+at 123.121.120.119 UDP port 1234. Use "encryptme" as the encryption key.
 .PP
 Remove the \-f option to run edge as a daemon.
 .PP
 Somewhere else setup another edge with similar parameters, eg.
 
-.B edge -f -d n2n0 -c mynetwork -k encryptme -u 99 -g 99 -m 00:DE:AD:BE:EF:02 -a 192.168.254.5 -l 123.121.120.119:7654
+.B edge \-f \-d n2n0 \-c mynetwork \-k encryptme \-u 99 \-g 99 \-m 00:DE:AD:BE:EF:02 \-a 192.168.254.5 \-l 123.121.120.119:1234
 .PP
 Now you can ping from 192.168.254.5 to 192.168.254.7.
 .PP
-The MAC address (-m <MAC>) and virtual IP address (-a <addr>) must be different
-on all edges in the same community.
+WebSocket mode (when UDP is blocked):
+
+.B edge \-f \-c mynetwork \-k encryptme \-a 10.64.0.2 \-l supernode.example.com:1234 \-w
 
 .SH LINUX CAPABILITIES
 Edge is aware of Linux
@@ -161,6 +149,12 @@ e.g.,
 
 .B setcap cap_net_admin+p ./edge
 
+.SH WEB SOCKET MODE
+When invoked with \-w, edge connects to the supernode using WebSocket (TCP)
+instead of UDP. All traffic is relayed through the supernode. This mode
+bypasses NAT/firewall restrictions that block UDP. For secure WSS, place
+a TLS reverse proxy (Nginx/Caddy) in front of the supernode.
+
 .SH IPv6
 When running in IPv6 mode (by using a IPv6 supernode), edge can only directly connect to other
 IPv6 edges directly.
@@ -170,9 +164,9 @@ IPv6 edges directly.
 .B n2n_v2(7)
 for more details).
 
-The -K <keyfile> option reads a key schedule file.
+The \-K <keyfile> option reads a key schedule file.
 
-.B edge \-d n2n0 \-c mynetwork \-K /path/to/file \-u 99 \-g 99 \-m 00:DE:AD:BE:EF:01 \-a 192.168.254.5 \-p 50001 \-l 123.121.120.119:7654
+.B edge \-d n2n0 \-c mynetwork \-K /path/to/file \-u 99 \-g 99 \-m 00:DE:AD:BE:EF:01 \-a 192.168.254.5 \-p 50001 \-l 123.121.120.119:1234
 .PP
 
 The key schedule file consists of line, one per key in the schedule. The purpose
@@ -211,17 +205,14 @@ If neither
 nor
 .B -K
 is specified then edge uses cleartext mode. In cleartext mode there is no
-transform of the packet data it is simply encrypted. This is useful for
+encryption. This is useful for
 debugging n2n as packet contents can be seen clearly.
 
 To prevent accidental exposure of data, edge only enters cleartext mode when no
-keying parameters are specified. In the case where keying parameters are
-specified but no valid keys can be determined, edge exits with an error at
-startup. If all keys become invalid while running, edge continues to encode
-using the last key that was valid.
+keying parameters are specified.
 
 .SH MANAGEMENT INTERFACE
-Edge provides a very simple management system on UDP port 5644. Send a newline
+Edge provides a simple management system on UDP port 5664. Send a newline
 to receive a status output. Send 'reload' to cause re-read of the
 keyfile. Send 'stop' to cause edge to exit cleanly.
 
@@ -230,15 +221,18 @@ edge is a daemon and any exit is an error.
 .SH AUTHORS
 .TP
 Richard Andrews
-andrews (at) ntop.org - n2n-1 maintainer and main author of n2n-2
+andrews (at) ntop.org \- n2n-1 maintainer and main author of n2n-2
 .TP
 Luca Deri
-deri (at) ntop.org - original author of n2n
+deri (at) ntop.org \- original author of n2n
 .TP
 Don Bindner
-(--) - significant contributions to n2n-1
+(--) \- significant contributions to n2n-1
 .TP
 Max Resch
+.TP
+lucktu
+n2n6 fork maintainer
 
 .SH SEE ALSO
 supernode(1) n2n_v2(7) capabilities(7)

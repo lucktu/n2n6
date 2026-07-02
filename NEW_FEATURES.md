@@ -24,3 +24,35 @@ Future:
 * Other Ciphers
 * Better Documentation
 * Code cleanup
+
+### v2.3_2.0
+
+- Add cd.yml
+- Remove the -b parameter
+- Porting Speck Encryption
+- Modify AES encryption
+
+### v2.3_5.4
+
+- Add STUN hole punching
+- Increase traffic monitoring and control
+- Enhanced IPv6 support
+- Replace B3 and add B4
+- KAdd upnp functionality
+
+### v2.3_5.6
+
+- Add support for txt parsing
+
+### v2.3_6.2
+
+- Add iptables bypass function
+- Encryption speed optimization
+
+### v2.3_6.3
+
+- Add ikcp to control speed
+
+### v2.3_6.4
+
+- Add the ws channel to the relay
