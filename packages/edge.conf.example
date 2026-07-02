@@ -1,0 +1,44 @@
+### n2n edge configuration file
+### Usage: edge /path/to/edge.conf
+#
+### This is an example — adjust parameters to match your setup.
+
+# Assigned IP address (omit for auto-assign from community pool)
+-a 10.64.0.2
+
+# Community name (required)
+-c mynetwork
+
+# Encryption key (use N2N_KEY env var instead if preferred)
+-k secret
+
+# Encryption mode: 1=none, 2=Twofish, 3=AES, 4=ChaCha20, 5=Speck
+-A 4
+
+# Supernode address (use one -l per supernode, up to 2)
+-l supernode.example.com:1234
+
+### ---- Optional ----
+
+# Enable packet forwarding (IP routing) through n2n
+# -r
+
+# Run in foreground (omit to daemonize)
+# -f
+
+# WebSocket mode (TCP relay, use when UDP is blocked)
+# -w
+
+# Local UDP port (omit for random)
+# -p 50001
+
+# Management port (default 5664)
+# -t 5664
+
+# MTU (default 1350)
+# -M 1350
+
+# MAC address (recommended to fix across restarts)
+# -m 00:DE:AD:BE:EF:01
+
+... ...
