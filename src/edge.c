@@ -2242,7 +2242,13 @@ static int send_PACKET( n2n_edge_t * eee,
 
     if (!dest) {
         /* Relay via supernode: WS mode uses ws_send, otherwise UDP */
-        edge_send_to_sn(eee, pktbuf, pktlen);
+        if (edge_send_to_sn(eee, pktbuf, pktlen) <= 0) {
+            /* Consecutive failures trigger supernode re-registration */
+            if (++eee->sn_relay_fails >= 3)
+                eee->last_register_req = 0;
+        } else {
+            eee->sn_relay_fails = 0;
+        }
     } else {
         sendto_sock( sock_for_dest(eee, &destination), pktbuf, pktlen, &destination );
     }
@@ -3667,6 +3673,7 @@ process_n2n_packet:
                         eee->last_sup = now;
                         eee->sn_wait = 0;
                         eee->sup_attempts = N2N_EDGE_SUP_ATTEMPTS;
+                        eee->sn_relay_fails = 0;
 
                         if (default_ip_assignment && ra.dev_addr.net_addr != 0) {
                             struct in_addr addr;

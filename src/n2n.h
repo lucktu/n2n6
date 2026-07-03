@@ -409,6 +409,7 @@ struct n2n_edge
     time_t              last_p2p;
     time_t              last_sup;
     size_t              sup_attempts;
+    uint8_t             sn_relay_fails;   /* consecutive relay send failures, reset on success */
     n2n_cookie_t        last_cookie;
     uint8_t             sn_ack_count;
     uint8_t             sn_ipv4_support;
