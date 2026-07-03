@@ -1216,7 +1216,9 @@ static int try_forward( n2n_sn_t * sss,
                 traceEvent(TRACE_DEBUG, "rate limit drop for community %s", cmn->community);
                 return 0;
             }
-            update_community_traffic(cs, pktsize, now);
+            /* Only count user data traffic (PACKET), not control messages */
+            if (cmn->pc == n2n_packet)
+                update_community_traffic(cs, pktsize, now);
         }
     }
 
@@ -1360,7 +1362,7 @@ static int process_mgmt( n2n_sn_t * sss,
                 double kbps   = cs->instant_Bps / 1024.0;
                 double gb_24h = cs->last_24h_bytes / (1024.0*1024.0*1024.0);
                 double gb_30d = cs->total_30d / (1024.0*1024.0*1024.0);
-                const char *arrow = (cs->instant_Bps > 0) ? "--->" : "    ";
+                const char *arrow = (kbps >= 0.1) ? "--->" : "    ";
                 ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                                    "%-57s  %s %-7.1f  %-7.1f  %-10.1f\n",
                                    communities[i], arrow, kbps, gb_24h, gb_30d);
@@ -1444,7 +1446,6 @@ static int process_mgmt( n2n_sn_t * sss,
 
     /* Offline communities: in comm_stats but no current edges */
     if (sss->traffic_stats_enabled) {
-        double off_kbps = 0.0, off_24h = 0.0, off_30d = 0.0;
         struct community_stats *cs = sss->comm_stats;
         while (cs) {
             int online = 0;
@@ -1458,34 +1459,18 @@ static int process_mgmt( n2n_sn_t * sss,
                 time_t idle = now - cs->last_active;
                 if (idle < 86400) {
                     /* Offline < 24h: show individually */
-                    if (cs->total_30d > 0) {
-                        double kbps  = cs->instant_Bps / 1024.0;
-                        double gb24h = cs->last_24h_bytes / (1024.0*1024.0*1024.0);
-                        double gb30d = cs->total_30d / (1024.0*1024.0*1024.0);
-                        const char *arrow = (cs->instant_Bps > 0) ? "--->" : "    ";
-                        ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                                           "%-57s  %s %-7.1f  %-7.1f  %-10.1f\n",
-                                           cs->community_name, arrow, kbps, gb24h, gb30d);
-                    } else {
-                        ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n",
-                                           cs->community_name);
-                    }
+                    double kbps  = cs->instant_Bps / 1024.0;
+                    double gb24h = cs->last_24h_bytes / (1024.0*1024.0*1024.0);
+                    double gb30d = cs->total_30d / (1024.0*1024.0*1024.0);
+                    ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
+                                       "%-57s       %-7.1f  %-7.1f  %-10.1f\n",
+                                       cs->community_name, kbps, gb24h, gb30d);
                     r = sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
                     if (r <= 0) return -1;
-                } else {
-                    /* Offline >= 24h: fold into summary */
-                    off_kbps += cs->instant_Bps / 1024.0;
-                    off_24h  += cs->last_24h_bytes / (1024.0*1024.0*1024.0);
-                    off_30d  += cs->total_30d / (1024.0*1024.0*1024.0);
                 }
+                /* Offline >= 24h: skip, no display */
             }
             cs = cs->next;
-        }
-        if (off_30d > 0) {
-            ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                               "%-57s       %-7.1f  %-7.1f  %-10.1f\n",
-                               "offline_community/24h", off_kbps, off_24h, off_30d);
-            sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
         }
     }
 
@@ -1500,7 +1485,7 @@ static int process_mgmt( n2n_sn_t * sss,
             cs = cs->next;
         }
         if (total_30d > 0 || total_24h > 0 || total_kbps > 0) {
-            const char *tarrow = (total_kbps > 0.0) ? "--->" : "    ";
+            const char *tarrow = (total_kbps >= 0.1) ? "--->" : "    ";
             ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                                "-------------\n"
                                "Total traffic                                              %s %-7.1f  %-7.1f  %-10.1f\n",
@@ -1581,7 +1566,9 @@ static int try_broadcast( n2n_sn_t * sss,
                            cmn->community);
                 return 0;
             }
-            update_community_traffic(cs, pktsize, now);
+            /* Only count user data traffic (PACKET), not control messages */
+            if (cmn->pc == n2n_packet)
+                update_community_traffic(cs, pktsize, now);
         }
     }
 
