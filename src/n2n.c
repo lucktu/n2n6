@@ -24,6 +24,10 @@
 #include "n2n.h"
 #include "minilzo.h"
 #include <assert.h>
+#ifndef _WIN32
+#include <sys/syscall.h>
+#include <sys/time.h>
+#endif
 
 #define PURGE_REGISTRATION_FREQUENCY   60
 #define REGISTRATION_TIMEOUT           150
@@ -181,11 +185,37 @@ SOCKET open_socket_unix(const char* path, mode_t access) {
 int traceLevel = 2 /* NORMAL */;
 bool useSyslog = false, syslog_opened = false, useSystemd = false;
 
+/* Get wall-clock time via direct syscall, bypassing musl's broken time().
+ * musl 64-bit time_t + 32-bit kernel syscall causes timespec layout mismatch,
+ * so time(NULL)/gettimeofday()/clock_gettime() all return garbage on 32-bit ARM.
+ * SYS_clock_gettime32 uses 32-bit timespec; native syscall uses native timespec. */
+static time_t n2n_wall_time(void) {
+#ifndef _WIN32
+    long ret = -1;
+#if defined(SYS_clock_gettime32)
+    /* 32-bit time syscall: must use 32-bit timespec to match */
+    struct { int32_t tv_sec; int32_t tv_nsec; } ts32;
+    ret = syscall(SYS_clock_gettime32, CLOCK_REALTIME, &ts32);
+    if (ret == 0) return (time_t)ts32.tv_sec;
+#elif defined(SYS_clock_gettime)
+    /* Native syscall: use native struct timespec (64-bit on 64-bit OS) */
+    struct timespec ts;
+    ret = syscall(SYS_clock_gettime, CLOCK_REALTIME, &ts);
+    if (ret == 0) return ts.tv_sec;
+#elif defined(__NR_clock_gettime)
+    struct timespec ts;
+    ret = syscall(__NR_clock_gettime, CLOCK_REALTIME, &ts);
+    if (ret == 0) return ts.tv_sec;
+#endif
+#endif
+    return time(NULL);
+}
+
 /* Monotonic time source: if system clock is near epoch (broken RTC),
  * return seconds elapsed since first call instead of wall-clock time.
  * This ensures all timeout logic works correctly on systems without NTP. */
 time_t n2n_now(void) {
-    time_t now = time(NULL);
+    time_t now = n2n_wall_time();
     if (now >= 946684800) return now; /* clock is fine (>= 2000-01-01) */
 
     /* Clock not set: use POSIX clock_gettime for monotonic time if available,
@@ -224,7 +254,7 @@ void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
         char out_buf[640];
         char theDate[N2N_TRACE_DATESIZE];
         char *extra_msg = "";
-        time_t theTime = time(NULL);
+        time_t theTime = n2n_wall_time();
         int i;
 
         memset(buf, 0, sizeof(buf));
@@ -398,13 +428,13 @@ void peer_list_add(struct peer_info * * list,
                    struct peer_info * element )
 {
     element->next = *list;
-    element->last_seen = time(NULL);
+    element->last_seen = n2n_now();
     *list = element;
 }
 
 
 size_t purge_expired_registrations( struct peer_info ** peer_list ) {
-    time_t now = time(NULL);
+    time_t now = n2n_now();
 
     return purge_peer_list( peer_list, now-REGISTRATION_TIMEOUT );
 }
