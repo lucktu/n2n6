@@ -43,7 +43,12 @@ SOCKET open_socket(uint16_t local_port, int bind_any) {
     SOCKET sock_fd;
     struct sockaddr_in local_address;
 
-    if((sock_fd = socket(PF_INET, SOCK_DGRAM, 0))  < 0) {
+    sock_fd = socket(PF_INET, SOCK_DGRAM, 0);
+#ifdef _WIN32
+    if (sock_fd == INVALID_SOCKET) {
+#else
+    if (sock_fd < 0) {
+#endif
         traceEvent(TRACE_ERROR, "Unable to create socket [%s][%d]\n", strerror(errno), sock_fd);
         return -1;
     }
@@ -58,9 +63,9 @@ SOCKET open_socket(uint16_t local_port, int bind_any) {
 #endif
 
 #ifdef _WIN32
-    /* Windows default UDP buffer is only 8KB, increase to 256KB for throughput */
+    /* Windows default UDP buffer is only 8KB, increase to 1MB for throughput */
     {
-        int bufsize = 256 * 1024;
+        int bufsize = 1024 * 1024;
         setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, (const char*)&bufsize, sizeof(bufsize));
         setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, (const char*)&bufsize, sizeof(bufsize));
     }
@@ -106,7 +111,12 @@ SOCKET open_socket6(uint16_t local_port, int bind_any) {
     struct sockaddr_in6 local_address;
     int sockopt = 1;
 
-    if((sock_fd = socket(PF_INET6, SOCK_DGRAM, 0)) < 0) {
+    sock_fd = socket(PF_INET6, SOCK_DGRAM, 0);
+#ifdef _WIN32
+    if (sock_fd == INVALID_SOCKET) {
+#else
+    if (sock_fd < 0) {
+#endif
         traceEvent(TRACE_ERROR, "Unable to create socket [%s][%d]\n", strerror(errno), sock_fd);
         return -1;
     }
@@ -561,7 +571,11 @@ int query_mgmt(uint16_t mgmt_port) {
     int got_data = 0;
 
     s = socket(PF_INET, SOCK_DGRAM, 0);
+#ifdef _WIN32
+    if (s == INVALID_SOCKET) {
+#else
     if (s < 0) {
+#endif
         printf("Failed to create socket\n");
         return -1;
     }
@@ -617,7 +631,22 @@ int query_mgmt(uint16_t mgmt_port) {
             if (line[i-1] != '\n') { line[i] = '\n'; i++; line[i] = '\0'; }
             sendto(s, line, i, 0, (struct sockaddr*)&addr, sizeof(addr));
         }
+#ifdef _WIN32
+        {
+            HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (hCon != INVALID_HANDLE_VALUE) {
+                CONSOLE_SCREEN_BUFFER_INFO csbi;
+                COORD top = {0, 0};
+                DWORD written;
+                GetConsoleScreenBufferInfo(hCon, &csbi);
+                FillConsoleOutputCharacter(hCon, ' ', csbi.dwSize.X * csbi.dwSize.Y, top, &written);
+                FillConsoleOutputAttribute(hCon, csbi.wAttributes, csbi.dwSize.X * csbi.dwSize.Y, top, &written);
+                SetConsoleCursorPosition(hCon, top);
+            }
+        }
+#else
         printf("\033[2J\033[H");
+#endif
 
         for (;;) {
             FD_ZERO(&fds);

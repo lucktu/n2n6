@@ -23,7 +23,9 @@
 #include "n2n.h"
 #include "bypass.h"
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
+
+#if defined(__linux__)
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -34,6 +36,39 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+
+/* Platform-neutral socket error (Linux: just errno) */
+#define BYPASS_ERRNO()          errno
+#define BYPASS_EAGAIN           EAGAIN
+#define BYPASS_EWOULDBLOCK      EWOULDBLOCK
+#define BYPASS_STRERR(e)        strerror(e)
+
+#elif defined(_WIN32)
+
+#include "win32/windivert.h"
+#include <errno.h>
+
+/* Platform-neutral socket error */
+#define BYPASS_ERRNO()          WSAGetLastError()
+#define BYPASS_EAGAIN           WSAEWOULDBLOCK
+#define BYPASS_EWOULDBLOCK      WSAEWOULDBLOCK
+#define BYPASS_STRERR(e)        "WSA err"
+
+/* Windows compatibility: POSIX shutdown constants */
+#ifndef SHUT_RDWR
+#define SHUT_RDWR SD_BOTH
+#endif
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
+
+/* MSG_DONTWAIT is Linux-specific. On Windows, non-blocking is set
+ * via ioctlsocket(FIONBIO), so use 0 (no extra flags needed). */
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
+
+#endif /* OS-specific includes */
 
 /* External function from edge.c */
 extern ssize_t sendto_sock(SOCKET fd, const void *buf, size_t len, const n2n_sock_t *dest);
@@ -70,12 +105,25 @@ static int bypass_kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
     return len;
 }
 
+/** Monotonic milliseconds for KCP timing (cross-platform). */
+static IUINT64 bypass_monotonic_ms(void)
+{
+#ifdef _WIN32
+    static ULONGLONG first = 0;
+    ULONGLONG now = GetTickCount64();
+    if (first == 0) first = now;
+    return now - first;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (IUINT64)ts.tv_sec * 1000 + (IUINT64)ts.tv_nsec / 1000000;
+#endif
+}
+
 /** KCP clock: milliseconds since connection start. */
 static IUINT32 bypass_kcp_time(struct bypass_conn *c)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    IUINT64 now_ms = (IUINT64)ts.tv_sec * 1000 + (IUINT64)ts.tv_nsec / 1000000;
+    IUINT64 now_ms = bypass_monotonic_ms();
     return (IUINT32)(now_ms - c->kcp_base);
 }
 
@@ -110,14 +158,14 @@ static int bypass_kcp_drain(bypass_context_t *ctx, struct bypass_conn *c)
                 }
                 break;
             }
-        } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        } else if (sent < 0 && (BYPASS_ERRNO() == BYPASS_EAGAIN || BYPASS_ERRNO() == BYPASS_EWOULDBLOCK)) {
             if (c->tx_buf_len + (size_t)ret <= BYPASS_TX_BUF_SIZE) {
                 memcpy(c->tx_buf + c->tx_buf_len, c->agg_buf, (size_t)ret);
                 c->tx_buf_len += (size_t)ret;
             }
             break;
         }
-        if (sent <= 0 && (sent == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)))
+        if (sent <= 0 && (sent == 0 || (BYPASS_ERRNO() != BYPASS_EAGAIN && BYPASS_ERRNO() != BYPASS_EWOULDBLOCK)))
             break;
     }
     /* Tell KCP to send window update if we drained data */
@@ -146,9 +194,7 @@ static int bypass_is_lan_peer(bypass_context_t *ctx, uint32_t virt_ip_host)
  *  @param is_lan  1 = LAN peer (aggressive MTU), 0 = WAN peer (frag-safe MTU) */
 static void bypass_kcp_init(struct bypass_conn *c, int is_lan)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    c->kcp_base = (IUINT64)ts.tv_sec * 1000 + (IUINT64)ts.tv_nsec / 1000000;
+    c->kcp_base = bypass_monotonic_ms();
     c->kcp = ikcp_create(c->conn_id, (void *)c);
     ikcp_setoutput(c->kcp, bypass_kcp_output);
     /* nodelay=1: faster response (RTO_min=30ms instead of 100ms).
@@ -159,11 +205,8 @@ static void bypass_kcp_init(struct bypass_conn *c, int is_lan)
      * resend=2: fast retransmit after 2 dup ACKs (avoids RTO on single loss).
      * nc=1: disable KCP's built-in congestion control (we manage window). */
     ikcp_nodelay(c->kcp, 1, 10, 2, 1);
-    /* Send window: 1024 segments.
-     * Receive window: 1024 segments.
-     * Note: actual throughput is governed by rmt_wnd (receiver's available
-     * window) and the waitsnd limit in bypass_handle_local_read. */
-    ikcp_wndsize(c->kcp, 1024, 1024);
+    c->snd_wnd = 1024;
+    ikcp_wndsize(c->kcp, c->snd_wnd, c->snd_wnd);
     if (is_lan) {
         /* LAN: MTU=8216 → ~4 KCP segments per 32KB TCP read.
          * Good balance of low overhead and reliable drain.
@@ -172,12 +215,10 @@ static void bypass_kcp_init(struct bypass_conn *c, int is_lan)
         c->max_read_limit = 0; /* use default = BYPASS_MAX_PAYLOAD */
     } else {
         /* WAN: small MTU (1400) → 1 IP fragment per UDP packet.
-         * Eliminates fragment loss as a cause of stalling. With
-         * waitsnd=1024, pipeline = 1.4MB in-flight.
-         * Read limit 4096 per cycle prevents drain bursts that
-         * cause rmt_wnd collapse on lossy/high-latency links. */
+         * Eliminates fragment loss as a cause of stalling.
+         * max_read_limit = MTU * BYPASS_READ_SEGMENTS. */
         ikcp_setmtu(c->kcp, KCP_MTU_WAN);
-        c->max_read_limit = 4096;
+        c->max_read_limit = KCP_MTU_WAN * BYPASS_READ_SEGMENTS;
     }
 }
 
@@ -294,7 +335,7 @@ static int bypass_sendto_nb(bypass_context_t *ctx, const uint8_t *buf, size_t le
     ssize_t sent = sendto(sock, (const char *)buf, len, MSG_DONTWAIT,
                            (struct sockaddr *)&peer_addr, addr_len);
     if (sent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        if (BYPASS_ERRNO() == BYPASS_EAGAIN || BYPASS_ERRNO() == BYPASS_EWOULDBLOCK)
             return -2;
         return -1;
     }
@@ -413,14 +454,35 @@ void bypass_accept_proxy(bypass_context_t *ctx)
     if (client_sock < 0)
         return;
 
-    /* Get original destination via SO_ORIGINAL_DST */
+    /* Get original destination (Linux: SO_ORIGINAL_DST, Windows: mapping table) */
     struct sockaddr_in orig_dst;
-    socklen_t dst_len = sizeof(orig_dst);
-    if (getsockopt(client_sock, SOL_IP, SO_ORIGINAL_DST,
-                   &orig_dst, &dst_len) != 0) {
-        closesocket(client_sock);
-        return;
+    memset(&orig_dst, 0, sizeof(orig_dst));
+#if defined(__linux__)
+    {
+        socklen_t dst_len = sizeof(orig_dst);
+        if (getsockopt(client_sock, SOL_IP, SO_ORIGINAL_DST,
+                       &orig_dst, &dst_len) != 0) {
+            closesocket(client_sock);
+            return;
+        }
     }
+#elif defined(_WIN32)
+    {
+        extern int windivert_lookup_orig_dst(windivert_ctx_t *,
+                                              uint32_t, uint16_t,
+                                              uint32_t *, uint16_t *);
+        windivert_ctx_t *wctx = (windivert_ctx_t *)ctx->windivert_ctx;
+        if (!wctx || windivert_lookup_orig_dst(wctx,
+                                                client_addr.sin_addr.s_addr,
+                                                client_addr.sin_port,
+                                                (uint32_t *)&orig_dst.sin_addr.s_addr,
+                                                &orig_dst.sin_port) != 0) {
+            closesocket(client_sock);
+            return;
+        }
+        orig_dst.sin_family = AF_INET;
+    }
+#endif
 
     uint32_t dst_virt_ip = ntohl(orig_dst.sin_addr.s_addr);
     uint16_t dst_port = ntohs(orig_dst.sin_port);
@@ -469,10 +531,17 @@ void bypass_accept_proxy(bypass_context_t *ctx)
     }
 
     /* Set non-blocking and socket options */
+#ifdef _WIN32
+    {
+        u_long mode = 1;
+        ioctlsocket(client_sock, FIONBIO, &mode);
+    }
+#else
     {
         int fl = fcntl(client_sock, F_GETFL, 0);
         fcntl(client_sock, F_SETFL, fl | O_NONBLOCK);
     }
+#endif
     int one = 1;
     setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof(one));
     {
@@ -575,15 +644,22 @@ void bypass_handle_local_read(bypass_context_t *ctx, int idx)
     if (c->fin_sent)
         return;
 
-    /* Backpressure: limit KCP pipeline to snd_wnd (1024) segments.
-     * Without this, snd_queue grows unbounded (KCP only caps snd_buf
-     * via snd_wnd, not snd_queue), causing memory exhaustion and
-     * segfaults at high throughput. Limit = snd_wnd = 1024 segments
-     * = 1024 × 4000 = 4MB in-flight max, supporting ~160Mbps at 200ms RTT. */
-    if (c->kcp && ikcp_waitsnd(c->kcp) >= 1024)
-        return;
-
+    /* Graduated backpressure: progressively reduce per-cycle read limit
+     * as KCP pipeline fills. Thresholds and divisors in bypass.h.
+     *   waitsnd < THR_HALF:       full speed
+     *   waitsnd THR_HALF-THR_SLOW: max_read_limit / HALF_DIV
+     *   waitsnd THR_SLOW-99%:      max_read_limit / SLOW_DIV
+     *   waitsnd >= 100%:           stop */
     size_t read_limit = (c->kcp && c->max_read_limit) ? c->max_read_limit : BYPASS_MAX_PAYLOAD;
+    if (c->kcp) {
+        int ws = ikcp_waitsnd(c->kcp);
+        if (ws >= c->snd_wnd)
+            return;
+        if (ws >= c->snd_wnd * BYPASS_BP_THR_SLOW / 100)
+            read_limit = read_limit / BYPASS_BP_SLOW_DIV;
+        else if (ws >= c->snd_wnd * BYPASS_BP_THR_HALF / 100)
+            read_limit = read_limit / BYPASS_BP_HALF_DIV;
+    }
     size_t total = 0;
     int eof = 0;
 
@@ -598,11 +674,11 @@ void bypass_handle_local_read(bypass_context_t *ctx, int idx)
         } else if (n == 0) {
             eof = 1;
             break;
-        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        } else if (BYPASS_ERRNO() == BYPASS_EAGAIN || BYPASS_ERRNO() == BYPASS_EWOULDBLOCK) {
             break;
         } else {
             traceEvent(TRACE_INFO, "bypass: local_sock read error %d conn_id=%u, closing",
-                       errno, (unsigned)c->conn_id);
+                       BYPASS_ERRNO(), (unsigned)c->conn_id);
             bypass_free_conn(ctx, idx);
             return;
         }
@@ -770,16 +846,23 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
         /* Connect to local service (blocking - localhost connect is fast) */
         if (connect(out_sock, (struct sockaddr *)&local_addr, sizeof(local_addr)) != 0) {
             traceEvent(TRACE_WARNING, "bypass: connect to localhost:%u failed: %s",
-                       (unsigned)dst_port, strerror(errno));
+                       (unsigned)dst_port, BYPASS_STRERR(BYPASS_ERRNO()));
             closesocket(out_sock);
             return;
         }
 
         /* Now set non-blocking for subsequent read/write */
+#ifdef _WIN32
+        {
+            u_long mode = 1;
+            ioctlsocket(out_sock, FIONBIO, &mode);
+        }
+#else
         {
             int fl = fcntl(out_sock, F_GETFL, 0);
             fcntl(out_sock, F_SETFL, fl | O_NONBLOCK);
         }
+#endif
 
         /* Allocate conn */
         int idx = bypass_alloc_conn(ctx);
@@ -973,7 +1056,7 @@ int bypass_tap_forward(bypass_context_t *ctx, uint8_t *eth_frame, size_t len)
         return 0;
 
     /* Send raw IP frame via bypass channel */
-    uint8_t pkt[BYPASS_HEADER_SIZE + len - 14 + BYPASS_ENCRYPT_OVERHEAD];
+    uint8_t pkt[2048];
     bypass_build_header(pkt, ctx->tx_transop_idx, BYPASS_FLAG_RAW, 0);
 
     /* Payload is the IP packet (without ethernet header) */
@@ -1130,16 +1213,28 @@ void bypass_start_negotiation(bypass_context_t *ctx, struct peer_info *peer)
 
     bypass_peer_entry_t *pe = bypass_find_peer(ctx, peer->assigned_ip);
     if (pe) {
-        /* Already exists. ACTIVE → nothing to do (bypass_tick keeps
-         * is_lan in sync). Other states → already negotiating. */
-        return;
-    }
-
-    /* Allocate peer entry (reuse if reset above) */
-    if (!pe) {
+        if (pe->state == BYPASS_PEER_ACTIVE) {
+            /* Already active — nothing to do (bypass_tick keeps is_lan in sync). */
+            return;
+        }
+        if (pe->state == BYPASS_PEER_PROBING ||
+            pe->state == BYPASS_PEER_CAPABLE ||
+            pe->state == BYPASS_PEER_TESTING) {
+            /* Already negotiating, don't restart. */
+            return;
+        }
+        /* NONE or UNAVAILABLE: peer entry exists but not negotiating.
+         * Restart negotiation with fresh address.
+         * Do NOT increment peer_count — slot already allocated. */
+        traceEvent(TRACE_INFO, "bypass: peer %s was %s, restarting negotiation",
+                   inet_ntoa((struct in_addr){htonl(peer->assigned_ip)}),
+                   pe->state == BYPASS_PEER_UNAVAILABLE ? "UNAVAILABLE" : "NONE");
+    } else {
+        /* Allocate new peer entry */
         pe = bypass_alloc_peer(ctx);
         if (!pe)
             return;
+        ctx->peer_count++;
     }
 
     /* Get peer's direct address */
@@ -1309,9 +1404,29 @@ void bypass_tick(bypass_context_t *ctx, time_t now)
         case BYPASS_PEER_ACTIVE:
             /* Keep is_lan in sync with peer_info: sockets[1] may become
              * available after initial negotiation (PEER_INFO arrives late).
-             * Once is_lan=1 it stays 1 (LAN never reverts to WAN). */
+             * Once is_lan=1 it stays 1 (LAN never reverts to WAN).
+             *
+             * Also check peer's last_seen from n2n: if peer went silent
+             * (e.g., restarted without DEREGISTER), transition to UNAVAILABLE
+             * so bypass can be restarted when peer reconnects. */
             if (!pe->is_lan)
                 pe->is_lan = bypass_is_lan_peer(ctx, pe->virt_ip);
+            {
+                struct peer_info *pi = bypass_find_peer_info(ctx->edge, pe->virt_ip);
+                if (pi && (now - pi->last_seen) > 150) {  /* REGISTRATION_TIMEOUT (150s) */
+                    /* Peer went silent in n2n layer. Reset to UNAVAILABLE. */
+                    bypass_del_peer_rule(ctx, pe->virt_ip);
+                    for (int i = 0; i < BYPASS_MAX_CONNS; i++) {
+                        if (ctx->conns[i].state != BYPASS_CONN_FREE &&
+                            ctx->conns[i].remote_virt_ip == pe->virt_ip)
+                            bypass_free_conn(ctx, i);
+                    }
+                    pe->state = BYPASS_PEER_UNAVAILABLE;
+                    pe->state_time = now;
+                    traceEvent(TRACE_INFO, "bypass: peer %s went silent, now UNAVAILABLE",
+                               inet_ntoa((struct in_addr){htonl(pe->virt_ip)}));
+                }
+            }
             break;
         }
     }
@@ -1385,6 +1500,7 @@ void bypass_tick(bypass_context_t *ctx, time_t now)
     }
 }
 
+#ifdef __linux__
 /* ===== iptables management ===== */
 
 static int bypass_run_iptables(const char *cmd)
@@ -1468,6 +1584,15 @@ void bypass_del_all_rules(bypass_context_t *ctx)
     pclose(fp);
 }
 
+#endif /* __linux__ */
+
+#ifdef _WIN32
+/* Stub implementations for Windows (iptables not available) */
+void bypass_add_peer_rule(bypass_context_t *ctx, uint32_t virt_ip_host) { }
+void bypass_del_peer_rule(bypass_context_t *ctx, uint32_t virt_ip_host) { }
+void bypass_del_all_rules(bypass_context_t *ctx) { }
+#endif
+
 /* ===== Init / Deinit ===== */
 
 int bypass_init(bypass_context_t *ctx, struct n2n_edge *edge,
@@ -1505,7 +1630,7 @@ int bypass_init(bypass_context_t *ctx, struct n2n_edge *edge,
     ctx->proxy_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (ctx->proxy_sock < 0) {
         traceEvent(TRACE_WARNING, "bypass: failed to create proxy socket: %s",
-                   strerror(errno));
+                   BYPASS_STRERR(BYPASS_ERRNO()));
         ctx->enabled = 0;
         return -1;
     }
@@ -1538,7 +1663,7 @@ int bypass_init(bypass_context_t *ctx, struct n2n_edge *edge,
                 ctx->proxy_sock = socket(AF_INET, SOCK_STREAM, 0);
                 if (ctx->proxy_sock < 0) {
                     traceEvent(TRACE_WARNING, "bypass: failed to create proxy socket: %s",
-                               strerror(errno));
+                               BYPASS_STRERR(BYPASS_ERRNO()));
                     ctx->enabled = 0;
                     return -1;
                 }
@@ -1567,14 +1692,21 @@ int bypass_init(bypass_context_t *ctx, struct n2n_edge *edge,
     }
 
     /* Set non-blocking so accept never blocks */
+#ifdef _WIN32
+    {
+        u_long mode = 1;
+        ioctlsocket(ctx->proxy_sock, FIONBIO, &mode);
+    }
+#else
     {
         int fl = fcntl(ctx->proxy_sock, F_GETFL, 0);
         fcntl(ctx->proxy_sock, F_SETFL, fl | O_NONBLOCK);
     }
+#endif
 
     if (listen(ctx->proxy_sock, 32) != 0) {
         traceEvent(TRACE_WARNING, "bypass: failed to listen on proxy port %u: %s",
-                   ctx->proxy_port, strerror(errno));
+                   ctx->proxy_port, BYPASS_STRERR(BYPASS_ERRNO()));
         closesocket(ctx->proxy_sock);
         ctx->proxy_sock = -1;
         ctx->enabled = 0;
@@ -1583,6 +1715,26 @@ int bypass_init(bypass_context_t *ctx, struct n2n_edge *edge,
 
     traceEvent(TRACE_INFO, "Bypass listening on %u",
                ctx->proxy_port);
+
+#ifdef _WIN32
+    /* Initialize WinDivert for transparent TCP redirect */
+    if (!ctx->user_disabled) {
+        extern int windivert_init(windivert_ctx_t *, uint16_t, uint32_t, uint32_t);
+        windivert_ctx_t *wctx = (windivert_ctx_t *)calloc(1, sizeof(windivert_ctx_t));
+        if (wctx) {
+            uint32_t tap_ip_n = ntohl(dev_ip);
+            if (windivert_init(wctx, ctx->proxy_port,
+                                tap_ip_n, 0xFFFFFF00) == 0) {
+                ctx->windivert_ctx = wctx;
+                wctx->bypass_ctx = ctx;  /* set back-pointer for peer state checks */
+            } else {
+                free(wctx);
+                traceEvent(TRACE_WARNING, "WinDivert init failed, bypass will be unavailable");
+            }
+        }
+    }
+#endif
+
     return 0;
 }
 
@@ -1605,6 +1757,16 @@ void bypass_deinit(bypass_context_t *ctx)
         closesocket(ctx->proxy_sock);
         ctx->proxy_sock = -1;
     }
+
+#ifdef _WIN32
+    /* Deinitialize WinDivert */
+    if (ctx->windivert_ctx) {
+        extern void windivert_deinit(windivert_ctx_t *);
+        windivert_deinit((windivert_ctx_t *)ctx->windivert_ctx);
+        free(ctx->windivert_ctx);
+        ctx->windivert_ctx = NULL;
+    }
+#endif
 
     ctx->enabled = 0;
     traceEvent(TRACE_INFO, "bypass: deinitialized");

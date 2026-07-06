@@ -39,7 +39,7 @@ struct peer_info;  /* forward declaration */
 /* Max plaintext bytes per encryption chunk. Must be large enough for
  * LAN MTU's max segment (8216 + IKCP_OVERHEAD ≈ 8240). PKT_BUF_SIZE
  * must accommodate the largest encrypted output. At runtime, WAN mode
- * limits per-cycle reads to 4096 (small TCP read = small chunk). */
+ * limits per-cycle reads to MTU*3 (fractional under backpressure). */
 #define BYPASS_MAX_CHUNK         32768
 #define BYPASS_MAX_PEERS         32
 /* Send buffer for local_sock overflow. 1MB prevents rmt_wnd collapse
@@ -56,6 +56,22 @@ struct peer_info;  /* forward declaration */
  * n2n's 16384-byte transform buffer limit. */
 #define KCP_MTU_LAN              8216
 #define KCP_MTU_WAN              1400
+
+/* Graduated backpressure: thresholds (% of snd_wnd) and per-cycle
+ * read limit divisors.
+ *   waitsnd < THR_HALF:       full speed (max_read_limit)
+ *   waitsnd THR_HALF-THR_SLOW: max_read_limit / HALF_DIV
+ *   waitsnd THR_SLOW-99%:      max_read_limit / SLOW_DIV
+ *   waitsnd >= 100%:           stop
+ * Lower thresholds = smoother, higher = more peak. */
+#define BYPASS_BP_THR_HALF       50
+#define BYPASS_BP_THR_SLOW       75
+#define BYPASS_BP_HALF_DIV       2
+#define BYPASS_BP_SLOW_DIV       4
+
+/* Base read limit: KCP segments per cycle. Multiplied by MTU to get
+ * max_read_limit. Lower = less sawtooth but potentially lower peak. */
+#define BYPASS_READ_SEGMENTS     3
 
 /* Flags in bypass header byte [5] */
 #define BYPASS_FLAG_SYN          0x01
@@ -115,7 +131,8 @@ struct bypass_conn
     size_t   tx_buf_len;        /* bytes in tx_buf */
     uint8_t *agg_buf;           /* [BYPASS_MAX_PAYLOAD] aggregation buffer for local read */
     uint8_t *pkt_buf;           /* [BYPASS_PKT_BUF_SIZE] encoded packet buffer */
-    size_t   max_read_limit;    /* per-cycle TCP read limit: 0=default(BYPASS_MAX_PAYLOAD), 4096=WAN */
+    size_t   max_read_limit;    /* per-cycle TCP read limit: 0=default(BYPASS_MAX_PAYLOAD), MTU*3=WAN */
+    int      snd_wnd;           /* KCP send window size (for backpressure thresholds) */
 };
 
 typedef struct
@@ -149,6 +166,9 @@ typedef struct bypass_context_s
     struct bypass_conn conns[BYPASS_MAX_CONNS];
     bypass_peer_entry_t peers[BYPASS_MAX_PEERS];
     int               peer_count;      /* number of peers in non-NONE state */
+#ifdef _WIN32
+    void             *windivert_ctx;   /* WinDivert ctx: windivert_ctx_t* on Windows, NULL otherwise */
+#endif
 } bypass_context_t;
 
 /* Fast check: whether any bypass peer negotiation is in progress or active.

@@ -11,5 +11,6 @@ add_library(n2n_win32 OBJECT
     getopt.c
     wintap.c
     scm_service.c
+    windivert.c
     ${N2N_RESOURCE}
 )

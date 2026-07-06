@@ -93,7 +93,16 @@ set(OBJECTS $<TARGET_OBJECTS:n2n>)
 
 # Platform-specific configuration
 if(DEFINED WIN32)
-set(CMAKE_RC_FLAGS /nologo)
+
+# Check if WinDivert binaries exist (optional bypass feature)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/win32/WinDivert.dll")
+    add_definitions(-DHAVE_WINDIVERT)
+    message(STATUS "WinDivert: found, bypass TCP intercept enabled")
+else()
+    message(STATUS "WinDivert: not found, TCP intercept unavailable")
+endif()
+
+set(CMAKE_RC_FLAGS "/nologo /I \"${CMAKE_CURRENT_SOURCE_DIR}/win32\"")
 if (MSVC)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd4477 /wd4267 /utf-8")
 add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE)

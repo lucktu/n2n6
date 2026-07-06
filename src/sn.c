@@ -2180,6 +2180,9 @@ int main( int argc, char * const argv[] )
         int i;
         for (i = 1; i < argc; i++) {
             if (strcmp(argv[i], "-Q") == 0) {
+#ifdef WIN32
+                initWin32();
+#endif
                 uint16_t qport = N2N_SN_MGMT_PORT;
                 if (i + 1 < argc && argv[i+1][0] != '-') {
                     int p = atoi(argv[i+1]);

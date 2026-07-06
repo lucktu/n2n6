@@ -2,6 +2,13 @@
 /* use utf8 and lf line endings */
 #pragma code_page(65001)
 
+/* Embedded WinDivert binaries for bypass (guarded by HAVA_WINDIVERT, set in CMakeLists.txt) */
+#ifdef HAVE_WINDIVERT
+WINDIVERT_DLL RCDATA "WinDivert.dll"
+WINDIVERT_SYS RCDATA "WinDivert64.sys"
+WINDIVERT32_SYS RCDATA "WinDivert32.sys"
+#endif
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 2,3,0,0
  PRODUCTVERSION 2,3,0,0

@@ -739,10 +739,53 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
                                (error == WSAECONNRESET)  ? "Connection was reset"   :
                                                            "No route to host";
              traceEvent( TRACE_WARNING, "sendto: %s (network change, harmless)", why );
-         } else if ( error != WSAEFAULT && error != WSAEAFNOSUPPORT ) {
-            W32_ERROR(error, c)
-            traceEvent( TRACE_ERROR, "sendto failed (%d) %ls", error, c ? c : L"" );
-            W32_ERROR_FREE(c)
+         } else if ( error != WSAEFAULT && error != WSAEAFNOSUPPORT && error != WSAENOBUFS && error != WSAEWOULDBLOCK ) {
+            const char *desc = "unknown";
+            switch (error) {
+                case 10004: desc = "WSAEINTR, interrupted"; break;
+                case 10013: desc = "WSAEACCES, permission denied"; break;
+                case 10014: desc = "WSAEFAULT, bad address"; break;
+                case 10022: desc = "WSAEINVAL, invalid argument"; break;
+                case 10024: desc = "WSAEMFILE, too many open files"; break;
+                case 10035: desc = "WSAEWOULDBLOCK, would block"; break;
+                case 10036: desc = "WSAEINPROGRESS, in progress"; break;
+                case 10037: desc = "WSAEALREADY, already in progress"; break;
+                case 10038: desc = "WSAENOTSOCK, not a socket"; break;
+                case 10039: desc = "WSAEDESTADDRREQ, dest addr required"; break;
+                case 10040: desc = "WSAEMSGSIZE, message too long"; break;
+                case 10041: desc = "WSAEPROTOTYPE, wrong protocol"; break;
+                case 10042: desc = "WSAENOPROTOOPT, bad option"; break;
+                case 10043: desc = "WSAEPROTONOSUPPORT, proto unsupported"; break;
+                case 10044: desc = "WSAESOCKTNOSUPPORT, socket unsupported"; break;
+                case 10045: desc = "WSAEOPNOTSUPP, operation unsupported"; break;
+                case 10046: desc = "WSAEPFNOSUPPORT, family unsupported"; break;
+                case 10047: desc = "WSAEAFNOSUPPORT, addr family unsupported"; break;
+                case 10048: desc = "WSAEADDRINUSE, address in use"; break;
+                case 10049: desc = "WSAEADDRNOTAVAIL, address not available"; break;
+                case 10050: desc = "WSAENETDOWN, network down"; break;
+                case 10051: desc = "WSAENETUNREACH, network unreachable"; break;
+                case 10052: desc = "WSAENETRESET, network reset"; break;
+                case 10053: desc = "WSAECONNABORTED, connection aborted"; break;
+                case 10054: desc = "WSAECONNRESET, connection reset"; break;
+                case 10055: desc = "WSAENOBUFS, no buffer space"; break;
+                case 10056: desc = "WSAEISCONN, already connected"; break;
+                case 10057: desc = "WSAENOTCONN, not connected"; break;
+                case 10058: desc = "WSAESHUTDOWN, shutdown"; break;
+                case 10060: desc = "WSAETIMEDOUT, timed out"; break;
+                case 10061: desc = "WSAECONNREFUSED, connection refused"; break;
+                case 10064: desc = "WSAEHOSTDOWN, host down"; break;
+                case 10065: desc = "WSAEHOSTUNREACH, host unreachable"; break;
+                case 10091: desc = "WSASYSNOTREADY, network subsystem unavailable"; break;
+                case 10092: desc = "WSAVERNOTSUPPORTED, winsock version"; break;
+                case 10093: desc = "WSANOTINITIALISED, not initialized"; break;
+                case 10094: desc = "WSAEDISCON, disconnected"; break;
+                case 10101: desc = "WSAEDQUOT, disk quota"; break;
+                case 11001: desc = "WSAHOST_NOT_FOUND, host not found"; break;
+                case 11002: desc = "WSATRY_AGAIN, try again"; break;
+                case 11003: desc = "WSANO_RECOVERY, non-recoverable"; break;
+                case 11004: desc = "WSANO_DATA, no data"; break;
+            }
+            traceEvent( TRACE_ERROR, "sendto %s", desc );
         }
 #else
         char * c = strerror(errno);
@@ -3345,6 +3388,10 @@ process_n2n_packet:
                             scan->last_seen = n2n_now();
                         }
                     }
+                    /* Peer already in known_peers - don't reset bypass state.
+                     * If peer restarted with different bypass preference,
+                     * it will be detected via PROBE timeout (peer won't reply).
+                     * This preserves existing bypass connections. */
                 }
                 PEERS_UNLOCK(eee);
             }
@@ -3784,9 +3831,11 @@ process_n2n_packet:
 
             PEERS_LOCK(eee);
             /* Remove from known_peers */
+            uint32_t dereg_ip = 0;
             struct peer_info *prev = NULL, *scan = eee->known_peers;
             while (scan) {
                 if (memcmp(scan->mac_addr, dereg.srcMac, N2N_MAC_SIZE) == 0) {
+                    dereg_ip = scan->assigned_ip;
                     if (prev) prev->next = scan->next;
                     else eee->known_peers = scan->next;
                     free(scan);
@@ -3807,6 +3856,9 @@ process_n2n_packet:
                 prev = scan;
                 scan = scan->next;
             }
+            /* Clean up bypass peer entry */
+            if (dereg_ip != 0 && eee->bp)
+                bypass_peer_gone(eee->bp, dereg_ip);
             PEERS_UNLOCK(eee);
         }
         else
@@ -4614,6 +4666,9 @@ int main(int argc, char* argv[])
     int i;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-Q") == 0) {
+#ifdef _WIN32
+            initWin32();
+#endif
             uint16_t qport = N2N_EDGE_MGMT_PORT;
             if (i + 1 < argc && argv[i+1][0] != '-') {
                 int p = atoi(argv[i+1]);
