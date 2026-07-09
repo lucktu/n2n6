@@ -215,6 +215,8 @@ ssize_t decode_sock( n2n_sock_t * sock,
     size_t idx0 = *idx;
     uint16_t f;
 
+    memset(sock, 0, sizeof(n2n_sock_t));
+
     decode_uint16( &f, base, rem, idx );
 
     if( f & 0x8000 )
@@ -362,6 +364,14 @@ size_t decode_REGISTER_SUPER( n2n_REGISTER_SUPER_t * reg,
     }
     retval += decode_uint16( &(reg->auth.scheme), base, rem, idx );
     retval += decode_uint16( &(reg->auth.toksize), base, rem, idx );
+    /* Consume auth token data if present, up to buffer space */
+    if ( reg->auth.toksize > 0 ) {
+        uint16_t toksize = reg->auth.toksize;
+        if (toksize > N2N_AUTH_TOKEN_SIZE) toksize = N2N_AUTH_TOKEN_SIZE;
+        if ( *rem >= toksize ) {
+            retval += decode_buf( reg->auth.token, toksize, base, rem, idx );
+        }
+    }
 
     return retval;
 }
@@ -639,8 +649,12 @@ size_t decode_PEER_INFO( n2n_PEER_INFO_t * pkt,
     /* version and os_name: optional, appended by new supernodes */
     if ( *rem >= sizeof(pkt->version) )
         retval += decode_buf( pkt->version, sizeof(pkt->version), base, rem, idx );
+    else
+        pkt->version[0] = '\0';
     if ( *rem >= sizeof(pkt->os_name) )
         retval += decode_buf( pkt->os_name, sizeof(pkt->os_name), base, rem, idx );
+    else
+        pkt->os_name[0] = '\0';
     return retval;
 }
 

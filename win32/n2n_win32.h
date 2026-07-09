@@ -27,6 +27,12 @@
 #include <winioctl.h>
 #include <ws2ipdef.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
+
+/* Fallback if SIO_UDP_CONNRESET is not defined by the SDK */
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 
 /* ip helper api */
 #include <iphlpapi.h>

@@ -272,11 +272,27 @@ static char ** buildargv(int * effectiveargc, char * const linebuffer) {
         char * p = strchr(buff,' ');
         if (p) {
             *p='\0';
-            argv[argc++] = strdup(buff);
+            argv[argc] = strdup(buff);
+            if (!argv[argc]) {
+                traceEvent(TRACE_ERROR, "Unable to allocate memory for argv[%d]", argc);
+                for (int j = 0; j < argc; j++) free(argv[j]);
+                free(argv);
+                free(buffer);
+                return NULL;
+            }
+            argc++;
             while(*++p == ' ');
             buff=p;
         } else {
-            argv[argc++] = strdup(buff);
+            argv[argc] = strdup(buff);
+            if (!argv[argc]) {
+                traceEvent(TRACE_ERROR, "Unable to allocate memory for argv[%d]", argc);
+                for (int j = 0; j < argc; j++) free(argv[j]);
+                free(argv);
+                free(buffer);
+                return NULL;
+            }
+            argc++;
             break;
         }
         if (argc >= maxargc) {
@@ -643,6 +659,7 @@ static void edge_deinit(n2n_edge_t * eee)
 
 #ifdef _WIN32
     WSACleanup();
+    DeleteCriticalSection(&eee->peers_lock);
 #endif
 }
 
@@ -1184,8 +1201,9 @@ static void send_register_super( n2n_edge_t * eee,
     edge_send_to_sn(eee, pktbuf, idx);
 
     /* Also register via alternate address family so supernode knows both our addresses.
-     * WS mode only uses a single WS connection, skip alt family registration. */
-    if (!eee->use_ws && eee->supernode_alt.family != 0) {
+     * WS mode only uses a single WS connection, skip alt family registration.
+     * Only send if alternate family differs from primary to avoid duplicate registrations. */
+    if (!eee->use_ws && eee->supernode_alt.family != 0 && eee->supernode_alt.family != supernode->family) {
         SOCKET alt_sock = (eee->supernode_alt.family == AF_INET6) ? eee->udp_sock6 : eee->udp_sock;
         if (alt_sock != -1) {
             traceEvent(TRACE_INFO, "send REGISTER_SUPER (alt) to %s",
@@ -2974,6 +2992,12 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
 
     traceEvent(TRACE_DEBUG, "mgmt status rq");
 
+    /* Drain any stale data from mgmt_sock before sending response */
+    {
+        uint8_t discard[256];
+        while (recvfrom(eee->mgmt_sock, (char*)discard, sizeof(discard), 0, NULL, NULL) > 0) {}
+    }
+
     /* Send community info */
     msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
                        "community: %s\n", eee->community_name_full[0] ? eee->community_name_full : eee->community_name);
@@ -3003,7 +3027,6 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             peer = peer->next;
             continue;
         }
-        sock_to_cstr(sockaddr, &peer->sock);
         const char *version = (peer->version[0] != '\0') ? peer->version : "unknown";
         const char *os_name = (peer->os_name[0] != '\0') ? peer->os_name : "unknown";
 
@@ -3015,14 +3038,39 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             inet_ntop(AF_INET, &addr, virt_ip, sizeof(virt_ip));
         }
 
-        msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                           " %2u  %-17s  %-15s  %-48s  %-7s  %s\n",
-                           id++,
-                           macaddr_str(mac, peer->mac_addr),
-                           virt_ip,
-                           sock_to_cstr(sockaddr, &peer->sock),
-                           version,
-                           os_name);
+        {
+            n2n_sock_str_t sbuf, sbuf6;
+            char wan[64];
+            snprintf(wan, sizeof(wan), "%s", sock_to_cstr(sbuf, &peer->sock));
+            if (peer->sock6.family != 0) {
+                const char *v6 = sock_to_cstr(sbuf6, &peer->sock6);
+                size_t cur = strlen(wan);
+                int budget = 48 - (int)cur - 1; /* column width - primary - '/' */
+                if (budget >= 6) {
+                    wan[cur++] = '/';
+                    if ((int)strlen(v6) <= budget) {
+                        strcpy(wan + cur, v6);
+                    } else {
+                        const char *port = strrchr(v6, ':');
+                        int port_len = port ? (int)strlen(port) : 0;
+                        int addr_max = budget - port_len;
+                        if (addr_max < 3) addr_max = 3;
+                        int w = 0;
+                        while (w < addr_max - 2 && v6[w]) { wan[cur + w] = v6[w]; w++; }
+                        wan[cur + w++] = '*';
+                        wan[cur + w++] = ']';
+                        if (port && w + port_len <= budget)
+                            memcpy(wan + cur + w, port, port_len + 1);
+                        else
+                            wan[cur + w] = '\0';
+                    }
+                }
+            }
+            msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                               " %2u  %-17s  %-15s  %-48s  %-7s  %s\n",
+                               id++, macaddr_str(mac, peer->mac_addr), virt_ip,
+                               wan, version, os_name);
+        }
         sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
                (struct sockaddr*) &sender_sock, i);
         peer = peer->next;
@@ -3041,7 +3089,6 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             peer = peer->next;
             continue;
         }
-        sock_to_cstr(sockaddr, &peer->sock);
         const char *version = (peer->version[0] != '\0') ? peer->version : "unknown";
         const char *os_name = (peer->os_name[0] != '\0') ? peer->os_name : "unknown";
 
@@ -3053,14 +3100,39 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             inet_ntop(AF_INET, &addr, virt_ip, sizeof(virt_ip));
         }
 
-        msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                           " %2u  %-17s  %-15s  %-48s  %-7s  %s\n",
-                           id++,
-                           macaddr_str(mac, peer->mac_addr),
-                           virt_ip,
-                           sock_to_cstr(sockaddr, &peer->sock),
-                           version,
-                           os_name);
+        {
+            n2n_sock_str_t sbuf, sbuf6;
+            char wan[64];
+            snprintf(wan, sizeof(wan), "%s", sock_to_cstr(sbuf, &peer->sock));
+            if (peer->sock6.family != 0) {
+                const char *v6 = sock_to_cstr(sbuf6, &peer->sock6);
+                size_t cur = strlen(wan);
+                int budget = 48 - (int)cur - 1; /* column width - primary - '/' */
+                if (budget >= 6) {
+                    wan[cur++] = '/';
+                    if ((int)strlen(v6) <= budget) {
+                        strcpy(wan + cur, v6);
+                    } else {
+                        const char *port = strrchr(v6, ':');
+                        int port_len = port ? (int)strlen(port) : 0;
+                        int addr_max = budget - port_len;
+                        if (addr_max < 3) addr_max = 3;
+                        int w = 0;
+                        while (w < addr_max - 2 && v6[w]) { wan[cur + w] = v6[w]; w++; }
+                        wan[cur + w++] = '*';
+                        wan[cur + w++] = ']';
+                        if (port && w + port_len <= budget)
+                            memcpy(wan + cur + w, port, port_len + 1);
+                        else
+                            wan[cur + w] = '\0';
+                    }
+                }
+            }
+            msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
+                               " %2u  %-17s  %-15s  %-48s  %-7s  %s\n",
+                               id++, macaddr_str(mac, peer->mac_addr), virt_ip,
+                               wan, version, os_name);
+        }
         sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
                (struct sockaddr*) &sender_sock, i);
         peer = peer->next;
@@ -3181,7 +3253,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
     size_t              msg_type;
     uint8_t             from_supernode;
     struct sockaddr_in6 sender_sock;
-    n2n_sock_t          sender;
+    n2n_sock_t          sender = {0};
     n2n_sock_t *        orig_sender = NULL;
     time_t              now = 0;
 
@@ -3903,6 +3975,7 @@ static void startTunReadThread(n2n_edge_t *eee)
                            (void*)eee,   /* argument to thread function */
                            0,            /* thread creation flags */
                            &dwThreadId); /* thread id out */
+    eee->tun_thread_handle = (hThread != NULL) ? hThread : NULL;
 }
 #endif
 
@@ -4283,6 +4356,18 @@ static int supernode2addr(n2n_sock_t * sn, int af, const n2n_sn_name_t addrIn) {
                         struct sockaddr_in6 * saddr = (struct sockaddr_in6*) selected->ai_addr;
                         memcpy( sn->addr.v6, &(saddr->sin6_addr), IPV6_SIZE );
                         sn->family = AF_INET6;
+                    } else {
+                        /* Unexpected address family */
+                        traceEvent(TRACE_WARNING, "Unsupported address family %d for %s", selected->ai_family, addr);
+                        freeaddrinfo(ainfo);
+                        err = -1;
+                        return -1;
+                    }
+
+                    /* If a specific family was requested, verify the result matches */
+                    if (err == 0 && af != AF_UNSPEC && sn->family != af) {
+                        traceEvent(TRACE_DEBUG, "supernode2addr: resolved family %d for %s does not match requested %d, accept as fallback",
+                                   sn->family, addr, af);
                     }
                 } else {
                     traceEvent(TRACE_WARNING, "Failed to resolve supernode IP address for %s", addr);
@@ -4291,17 +4376,27 @@ static int supernode2addr(n2n_sock_t * sn, int af, const n2n_sn_name_t addrIn) {
                 freeaddrinfo(ainfo);
                 err = 0;
             } else {
-                /* getaddrinfo failed, try public DNS: IPv4 first, then IPv6 if needed */
+                /* getaddrinfo failed, try public DNS: prefer requested family, fallback to other */
                 char ip_str[64];
-                int try_ipv6 = (af != AF_INET);
-                
-                if (query_dns_record(addr, ip_str, sizeof(ip_str), 0) == 0 &&
-                    inet_pton(AF_INET, ip_str, &sn->addr.v4) == 1) {
+
+                if ( (af != AF_INET) /* want IPv6 */ &&
+                     query_dns_record(addr, ip_str, sizeof(ip_str), 1) == 0 &&
+                     inet_pton(AF_INET6, ip_str, &sn->addr.v6) == 1) {
+                    sn->family = AF_INET6;
+                    err = 0;
+                } else if ( (af != AF_INET6) /* want IPv4 */ &&
+                            query_dns_record(addr, ip_str, sizeof(ip_str), 0) == 0 &&
+                            inet_pton(AF_INET, ip_str, &sn->addr.v4) == 1) {
                     sn->family = AF_INET;
                     err = 0;
-                } else if (try_ipv6 && 
-                           query_dns_record(addr, ip_str, sizeof(ip_str), 1) == 0 &&
+                } else if (query_dns_record(addr, ip_str, sizeof(ip_str), 0) == 0 &&
+                           inet_pton(AF_INET, ip_str, &sn->addr.v4) == 1) {
+                    /* Fallback: IPv4 */
+                    sn->family = AF_INET;
+                    err = 0;
+                } else if (query_dns_record(addr, ip_str, sizeof(ip_str), 1) == 0 &&
                            inet_pton(AF_INET6, ip_str, &sn->addr.v6) == 1) {
+                    /* Fallback: IPv6 */
                     sn->family = AF_INET6;
                     err = 0;
                 } else {
@@ -5120,8 +5215,12 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
 
         if (can_resolve && supernode2addr(&eee.supernode_alt, alt_af, sn_host) == 0) {
             n2n_sock_str_t sockbuf_alt;
-            traceEvent(TRACE_INFO, "Supernode alt address resolved: %s",
-                       sock_to_cstr(sockbuf_alt, &eee.supernode_alt));
+            if (eee.supernode_alt.family != alt_af) {
+                traceEvent(TRACE_DEBUG, "Supernode alt address: expected %s but resolved to %s",
+                           (alt_af == AF_INET6) ? "IPv6" : "IPv4",
+                           sock_to_cstr(sockbuf_alt, &eee.supernode_alt));
+                /* Keep it but will be skipped in send_register_super due to family check */
+            }
         }
     }
 
@@ -5542,6 +5641,15 @@ static int run_loop(n2n_edge_t * eee )
 cleanup:
 #ifdef _WIN32
     eee->keep_running = 0;
+    /* Close TAP first to wake up the TUN reader thread blocked on tuntap_read() */
+    tuntap_close(&(eee->device));
+    if (eee->tun_thread_handle != NULL) {
+        WaitForSingleObject(eee->tun_thread_handle, INFINITE);
+        CloseHandle(eee->tun_thread_handle);
+        eee->tun_thread_handle = NULL;
+    }
+#else
+    tuntap_close(&(eee->device));
 #endif
 
     send_deregister( eee, &(eee->supernode));
@@ -5564,7 +5672,10 @@ cleanup:
         eee->udp_sock = -1;
     }
 
-    tuntap_close(&(eee->device));
+    if (eee->udp_sock6 != -1) {
+        closesocket(eee->udp_sock6);
+        eee->udp_sock6 = -1;
+    }
 
     edge_deinit( eee );
 

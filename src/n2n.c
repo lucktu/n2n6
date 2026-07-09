@@ -59,6 +59,12 @@ SOCKET open_socket(uint16_t local_port, int bind_any) {
     {
         u_long mode = 1;
         ioctlsocket(sock_fd, FIONBIO, &mode);
+        /* Prevent WSAECONNRESET error spam on Windows when ICMP
+         * port unreachable messages arrive for this UDP socket. */
+        DWORD bytesReturned = 0;
+        BOOL newBehavior = FALSE;
+        WSAIoctl(sock_fd, SIO_UDP_CONNRESET, &newBehavior, sizeof(newBehavior),
+                 NULL, 0, &bytesReturned, NULL, NULL);
     }
 #endif
 
@@ -123,6 +129,17 @@ SOCKET open_socket6(uint16_t local_port, int bind_any) {
 
 #ifndef _WIN32
     fcntl(sock_fd, F_SETFL, O_NONBLOCK);
+#else
+    {
+        u_long mode = 1;
+        ioctlsocket(sock_fd, FIONBIO, &mode);
+        /* Prevent WSAECONNRESET error spam on Windows when ICMP
+         * port unreachable messages arrive for this UDP socket. */
+        DWORD bytesReturned = 0;
+        BOOL newBehavior = FALSE;
+        WSAIoctl(sock_fd, SIO_UDP_CONNRESET, &newBehavior, sizeof(newBehavior),
+                 NULL, 0, &bytesReturned, NULL, NULL);
+    }
 #endif
 
     setsockopt(sock_fd, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&sockopt, sizeof(sockopt));
@@ -520,10 +537,15 @@ char * sock_to_cstr( n2n_sock_str_t out, const n2n_sock_t * sock )
         snprintf( out, N2N_SOCKBUF_SIZE, "[%s]:%hu", buffer, sock->port );
         return out;
     }
-    else
+    else if ( AF_INET == sock->family )
     {
         inet_ntop(AF_INET, &sock->addr, buffer, sizeof(buffer));
         snprintf( out, N2N_SOCKBUF_SIZE, "%s:%hu", buffer, sock->port );
+        return out;
+    }
+    else
+    {
+        snprintf( out, N2N_SOCKBUF_SIZE, "unknown_af(%d):%hu", sock->family, sock->port );
         return out;
     }
 }
@@ -593,7 +615,7 @@ int query_mgmt(uint16_t mgmt_port) {
         FD_ZERO(&fds);
         FD_SET(s, &fds);
         tv.tv_sec = 0;
-        tv.tv_usec = 50000;  /* 50ms per packet */
+        tv.tv_usec = 200000;  /* 200ms per packet, allow for multiple datagrams */
         ret = select((int)(s+1), &fds, NULL, NULL, &tv);
         if (ret <= 0) break;  /* timeout or error: no more data */
         ret = (int)recvfrom(s, buf, sizeof(buf)-1, 0, NULL, NULL);

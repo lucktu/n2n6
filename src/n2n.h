@@ -443,6 +443,7 @@ struct n2n_edge
 
 #ifdef _WIN32
     volatile int        keep_running;
+    HANDLE              tun_thread_handle;
 #endif
 
     /* Rate-limiting for P2P/PsP log messages */

@@ -264,8 +264,11 @@ static void stats_dat_path(const char *cfgpath, char *out, size_t sz)
 #endif
     if (dot && dot > slash)
         strcpy(dot, ".dat");
-    else
-        strncat(out, ".dat", sz - strlen(out) - 1);
+    else {
+        size_t remaining = sz - strlen(out) - 1;
+        if (remaining > 0)
+            strncat(out, ".dat", remaining);
+    }
 }
 
 /** Derive cfg file path: replace .dat suffix with .cfg */
@@ -923,19 +926,18 @@ static int update_edge( n2n_sn_t * sss,
             }
 
             /* Alt-family registration: update address.
-             * Only switch connect_family if old family stale (restart case).
-             * In dual-stack both registrations arrive within same cycle (<5s). */
+             * Keep connect_family as primary registration's family.
+             * sn_send_to_peer dual-sends to both IPv4 and IPv6, so
+             * connect_family no longer needs switching. */
             if (existing_family != 0 && sender_sock->family != existing_family) {
                 if (sender_sock->family == AF_INET6) {
                     int had_sock6 = (scan->sock6.family == AF_INET6);
                     memcpy(&scan->sock6, sender_sock, sizeof(n2n_sock_t));
-                    if (now - scan->last_seen >= 5) {
-                        scan->connect_family = AF_INET6;
-                    }
                     scan->num_sockets = 0;
                     if (scan->sock.family == AF_INET) {
                         scan->sockets[scan->num_sockets++] = scan->sock;
-                    } else {
+                    }
+                    if (scan->sock6.family == AF_INET6) {
                         scan->sockets[scan->num_sockets++] = scan->sock6;
                     }
                     if (local_sock_ena && local_sock) {
@@ -944,15 +946,13 @@ static int update_edge( n2n_sn_t * sss,
                     scan->last_seen = now;
                     return had_sock6 ? 0 : 1;
                 }
-                /* IPv4 alt: primary was IPv6, switch only if stale */
+                /* IPv4 alt: primary was IPv6 */
                 memcpy(&scan->sock, sender_sock, sizeof(n2n_sock_t));
-                if (now - scan->last_seen >= 5) {
-                    scan->connect_family = AF_INET;
-                }
                 scan->num_sockets = 0;
                 if (scan->sock.family == AF_INET) {
                     scan->sockets[scan->num_sockets++] = scan->sock;
-                } else {
+                }
+                if (scan->sock6.family == AF_INET6) {
                     scan->sockets[scan->num_sockets++] = scan->sock6;
                 }
                 if (local_sock_ena && local_sock) {
@@ -1104,20 +1104,20 @@ static ssize_t sn_send_to_peer(n2n_sn_t * sss,
          * incorrectly closing the connection and leaving peer->ws dangling. */
         return ws_send(peer->ws, pktbuf, pktsize);
     }
-    /* UDP routing: prefer primary address family, fallback to alternate */
+    /* UDP routing: dual-send to both IPv4 and IPv6 if available.
+     * UDP sendto always succeeds (packet accepted by kernel) even when the
+     * peer's NAT mapping is stale, so primary/fallback based on sendto return
+     * value never triggers. Send to both paths so the peer receives data on
+     * whichever path is actually reachable. */
     {
-        n2n_sock_t *primary = (peer->connect_family == AF_INET6 &&
-                               peer->sock6.family == AF_INET6)
-                              ? &peer->sock6 : &peer->sock;
-        n2n_sock_t *fallback = (primary == &peer->sock6) ? &peer->sock : &peer->sock6;
-        ssize_t r;
-        if (primary->family != 0) {
-            r = sendto_sock(sss, primary, pktbuf, pktsize);
-            if (r == (ssize_t)pktsize) return r;
+        ssize_t r = -1;
+        if (peer->sock.family != 0)
+            r = sendto_sock(sss, &peer->sock, pktbuf, pktsize);
+        if (peer->sock6.family != 0) {
+            ssize_t r6 = sendto_sock(sss, &peer->sock6, pktbuf, pktsize);
+            if (r6 == (ssize_t)pktsize) r = r6;
         }
-        if (fallback->family != 0)
-            return sendto_sock(sss, fallback, pktbuf, pktsize);
-        return -1;
+        return r;
     }
 }
 
@@ -1151,6 +1151,7 @@ static ssize_t sendto_sock(n2n_sn_t * sss,
                            size_t pktsize)
 {
     n2n_sock_str_t      sockbuf;
+    ssize_t             sent;
 
     if ( AF_INET == sock->family )
     {
@@ -1160,11 +1161,7 @@ static ssize_t sendto_sock(n2n_sn_t * sss,
         udpsock.sin_port = htons( sock->port );
         memcpy( &(udpsock.sin_addr), &(sock->addr.v4), IPV4_SIZE );
 
-        traceEvent( TRACE_DEBUG, "sendto_sock %lu to %s",
-                    pktsize,
-                    sock_to_cstr( sockbuf, sock ) );
-
-        return sendto( sss->sock, pktbuf, pktsize, 0,
+        sent = sendto( sss->sock, pktbuf, pktsize, 0,
                        (const struct sockaddr *)&udpsock, sizeof(struct sockaddr_in) );
     }
     else if ( AF_INET6 == sock->family )
@@ -1175,11 +1172,7 @@ static ssize_t sendto_sock(n2n_sn_t * sss,
         udpsock.sin6_port = htons( sock->port );
         memcpy( &(udpsock.sin6_addr), &(sock->addr.v6), IPV6_SIZE );
 
-        traceEvent( TRACE_DEBUG, "sendto_sock6 %lu to %s",
-                    pktsize,
-                    sock_to_cstr( sockbuf, sock ) );
-
-        return sendto( sss->sock6, pktbuf, pktsize, 0,
+        sent = sendto( sss->sock6, pktbuf, pktsize, 0,
                        (const struct sockaddr *)&udpsock, sizeof(struct sockaddr_in6) );
     }
     else
@@ -1187,6 +1180,30 @@ static ssize_t sendto_sock(n2n_sn_t * sss,
         errno = EAFNOSUPPORT;
         return -1;
     }
+
+    if ( sent < 0 )
+    {
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        /* WSAECONNRESET is expected on UDP (ICMP port unreachable) - silently ignore.
+         * Also silence WSAEFAULT (10014), WSAEAFNOSUPPORT (10047), WSAEWOULDBLOCK (10035). */
+        if ( error != 10014 && error != 10047 && error != 10035 &&
+             error != WSAECONNRESET ) {
+            traceEvent( TRACE_ERROR, "sendto_sock failed: code=%d to %s",
+                        error, sock_to_cstr( sockbuf, sock ) );
+        }
+#else
+        traceEvent( TRACE_DEBUG, "sendto_sock failed (%d) %s to %s",
+                    errno, strerror(errno), sock_to_cstr( sockbuf, sock ) );
+#endif
+    }
+    else
+    {
+        traceEvent( TRACE_DEBUG, "sendto_sock sent=%d to %s",
+                    (int)sent, sock_to_cstr( sockbuf, sock ) );
+    }
+
+    return sent;
 }
 
 
@@ -1200,14 +1217,15 @@ static int try_forward( n2n_sn_t * sss,
                         size_t pktsize )
 {
     struct peer_info *  scan;
+    struct community_stats *cs = NULL;
     macstr_t            mac_buf;
     n2n_sock_str_t      sockbuf;
     time_t              now = time(NULL);
 
     /* Rate limiting check */
     if (sss->traffic_stats_enabled) {
-        struct community_stats *cs = get_community_stats(&sss->comm_stats,
-                                                          cmn->community, now);
+        cs = get_community_stats(&sss->comm_stats,
+                                                      cmn->community, now);
         if (cs) {
             /* Apply rules on first use (new entry has zeroed limits) */
             if (cs->rate_limit_bps == 0 && cs->max_24h_bytes == 0)
@@ -1216,9 +1234,6 @@ static int try_forward( n2n_sn_t * sss,
                 traceEvent(TRACE_DEBUG, "rate limit drop for community %s", cmn->community);
                 return 0;
             }
-            /* Only count user data traffic (PACKET), not control messages */
-            if (cmn->pc == n2n_packet)
-                update_community_traffic(cs, pktsize, now);
         }
     }
 
@@ -1236,6 +1251,7 @@ static int try_forward( n2n_sn_t * sss,
         if ( data_sent_len == pktsize )
         {
             ++(sss->stats.fwd);
+            if (cs) update_community_traffic(cs, pktsize, now);
             traceEvent(TRACE_DEBUG, "unicast %lu to [%s] %s%s",
                        pktsize,
                        sock_to_cstr( sockbuf, primary ),
@@ -1317,11 +1333,18 @@ static int process_mgmt( n2n_sn_t * sss,
         return -1;
     }
 
+    /* Drain any stale data from mgmt_sock before sending response */
+    {
+        uint8_t discard[256];
+        while (recvfrom(sss->mgmt_sock, (char*)discard, sizeof(discard), 0, NULL, NULL) > 0) {}
+    }
+
     /* Send header */
     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                       "  id  mac                virt_ip          wan_ip               <KB/s     GB/24h   GB/30d>  ver      os\n");
-    ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
-                       "---v2.3----------------------------------------------------------------------------------------------------\n");
+    if (ressize < N2N_SN_PKTBUF_SIZE)
+        ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
+                           "---v2.3----------------------------------------------------------------------------------------------------\n");
 
     r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
                sender_sock, sender_sock_len);
@@ -1362,15 +1385,18 @@ static int process_mgmt( n2n_sn_t * sss,
                 double kbps   = cs->instant_Bps / 1024.0;
                 double gb_24h = cs->last_24h_bytes / (1024.0*1024.0*1024.0);
                 double gb_30d = cs->total_30d / (1024.0*1024.0*1024.0);
+                /* Zero out KB/s if no traffic in last COMM_STATS_SECONDS */
+                if (now - cs->last_second >= COMM_STATS_SECONDS)
+                    kbps = 0.0;
                 const char *arrow = (kbps >= 0.1) ? "--->" : "    ";
                 ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                                   "%-57s  %s %-7.1f  %-7.1f  %-10.1f\n",
+                                   "%-57.16s  %s %-7.1f  %-7.1f  %-10.1f\n",
                                    communities[i], arrow, kbps, gb_24h, gb_30d);
             } else {
-                ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n", communities[i]);
+                ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%.16s\n", communities[i]);
             }
         } else {
-            ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n", communities[i]);
+            ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%.16s\n", communities[i]);
         }
         r = sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
         if (r <= 0) return -1;
@@ -1413,26 +1439,37 @@ static int process_mgmt( n2n_sn_t * sss,
                 snprintf(virt_ip, sizeof(virt_ip), "%s", inet_ntoa(a));
 
             {
-                char wan_buf[72];
-                n2n_sock_str_t addr_str;
-                n2n_sock_t *primary_sock;
-
-                if (edge->connect_family == AF_INET6 && edge->sock6.family == AF_INET6) {
-                    primary_sock = &edge->sock6;
-                } else {
-                    primary_sock = &edge->sock;
+                n2n_sock_str_t sbuf, sbuf6;
+                char wan[64];
+                snprintf(wan, sizeof(wan), "%s", sock_to_cstr(sbuf, &edge->sock));
+                if (edge->sock6.family != 0) {
+                    const char *v6 = sock_to_cstr(sbuf6, &edge->sock6);
+                    size_t cur = strlen(wan);
+                    int budget = 47 - (int)cur - 1; /* column width - primary - '/' */
+                    if (budget >= 6) {
+                        wan[cur++] = '/';
+                        if ((int)strlen(v6) <= budget) {
+                            strcpy(wan + cur, v6);
+                        } else {
+                            const char *port = strrchr(v6, ':');
+                            int port_len = port ? (int)strlen(port) : 0;
+                            int addr_max = budget - port_len;
+                            if (addr_max < 3) addr_max = 3;
+                            int w = 0;
+                            while (w < addr_max - 2 && v6[w]) { wan[cur + w] = v6[w]; w++; }
+                            wan[cur + w++] = '*';
+                            wan[cur + w++] = ']';
+                            if (port && w + port_len <= budget)
+                                memcpy(wan + cur + w, port, port_len + 1);
+                            else
+                                wan[cur + w] = '\0';
+                        }
+                    }
                 }
-                snprintf(wan_buf, sizeof(wan_buf), "%s",
-                         sock_to_cstr(addr_str, primary_sock));
-
                 ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                                    "  %2u  %-17s  %-15s  %-47s  %-7s  %s\n",
-                                   id++,
-                                   macaddr_str(mac_buf, edge->mac_addr),
-                                   virt_ip,
-                                   wan_buf,
-                                   version,
-                                   os_name);
+                                   id++, macaddr_str(mac_buf, edge->mac_addr), virt_ip,
+                                   wan, version, os_name);
             }
 
             r = sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
@@ -1463,7 +1500,7 @@ static int process_mgmt( n2n_sn_t * sss,
                     double gb24h = cs->last_24h_bytes / (1024.0*1024.0*1024.0);
                     double gb30d = cs->total_30d / (1024.0*1024.0*1024.0);
                     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                                       "%-57s       %-7.1f  %-7.1f  %-10.1f\n",
+                                       "%-57.16s       %-7.1f  %-7.1f  %-10.1f\n",
                                        cs->community_name, kbps, gb24h, gb30d);
                     r = sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
                     if (r <= 0) return -1;
@@ -1479,7 +1516,8 @@ static int process_mgmt( n2n_sn_t * sss,
         double total_kbps = 0.0, total_24h = 0.0, total_30d = 0.0;
         struct community_stats *cs = sss->comm_stats;
         while (cs) {
-            total_kbps += cs->instant_Bps / 1024.0;
+            total_kbps += (now - cs->last_second >= COMM_STATS_SECONDS)
+                          ? 0.0 : (cs->instant_Bps / 1024.0);
             total_24h  += cs->last_24h_bytes / (1024.0*1024.0*1024.0);
             total_30d  += cs->total_30d / (1024.0*1024.0*1024.0);
             cs = cs->next;
@@ -1526,13 +1564,14 @@ static int process_mgmt( n2n_sn_t * sss,
     char time_buf[32];
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", localtime(&now));
 
-    ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
-                       "broadcast %u | reg_sup %u | fwd %u | ip_support: %s | %s\n",
-                       (unsigned int) sss->stats.broadcast,
-                       (unsigned int)sss->stats.reg_super,
-                       (unsigned int) sss->stats.fwd,
-                       ip_support,
-                       time_buf);
+    if (ressize < N2N_SN_PKTBUF_SIZE)
+        ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
+                           "broadcast %u | reg_sup %u | fwd %u | ip_support: %s | %s\n",
+                           (unsigned int) sss->stats.broadcast,
+                           (unsigned int)sss->stats.reg_super,
+                           (unsigned int) sss->stats.fwd,
+                           ip_support,
+                           time_buf);
 
     r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
               sender_sock, sender_sock_len);
@@ -1548,6 +1587,8 @@ static int try_broadcast( n2n_sn_t * sss,
                           size_t pktsize )
 {
     struct peer_info *  scan;
+    struct community_stats *cs = NULL;
+    int bc_count = 0;
     macstr_t            mac_buf;
     n2n_sock_str_t      sockbuf;
     time_t              now = time(NULL);
@@ -1556,8 +1597,8 @@ static int try_broadcast( n2n_sn_t * sss,
 
     /* Rate limiting check for broadcast */
     if (sss->traffic_stats_enabled) {
-        struct community_stats *cs = get_community_stats(&sss->comm_stats,
-                                                          cmn->community, now);
+        cs = get_community_stats(&sss->comm_stats,
+                                                      cmn->community, now);
         if (cs) {
             if (cs->rate_limit_bps == 0 && cs->max_24h_bytes == 0)
                 apply_rules_to_stats(cs, sss->rate_rules);
@@ -1566,9 +1607,6 @@ static int try_broadcast( n2n_sn_t * sss,
                            cmn->community);
                 return 0;
             }
-            /* Only count user data traffic (PACKET), not control messages */
-            if (cmn->pc == n2n_packet)
-                update_community_traffic(cs, pktsize, now);
         }
     }
 
@@ -1592,6 +1630,7 @@ static int try_broadcast( n2n_sn_t * sss,
             else
             {
                 ++(sss->stats.broadcast);
+                ++bc_count;
                 traceEvent(TRACE_DEBUG, "multicast %lu to %s %s%s",
                            pktsize,
                            sock_to_cstr( sockbuf, primary ),
@@ -1602,6 +1641,9 @@ static int try_broadcast( n2n_sn_t * sss,
 
         scan = scan->next;
     }
+
+    if (bc_count > 0 && cs)
+        update_community_traffic(cs, pktsize * bc_count, now);
 
     return 0;
 }
@@ -2090,7 +2132,7 @@ static int process_udp( n2n_sn_t * sss,
                         socklen_t sock_len2 = (sender_sock->sa_family == AF_INET6) ?
                                      sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
                         sendto(send_sock2, pibuf, pix, 0,
-                               (struct sockaddr *)sender_sock, sock_len2);
+                               sender_sock, sock_len2);
                     }
                     traceEvent(TRACE_DEBUG, "pushed PEER_INFO %s to new edge %s%s",
                                macaddr_str(mac_buf, p->mac_addr),
@@ -2417,8 +2459,10 @@ static int run_loop( n2n_sn_t * sss )
             max_sock = max(max_sock, sss->sock6);
         }
 
-        FD_SET(sss->mgmt_sock, &socket_mask);
-        max_sock = max(max_sock, sss->mgmt_sock);
+        if (sss->mgmt_sock != -1) {
+            FD_SET(sss->mgmt_sock, &socket_mask);
+            max_sock = max(max_sock, sss->mgmt_sock);
+        }
 
         /* WebSocket: listen socket + all established ws_conns */
         if (sss->ws_listen_sock >= 0) {
