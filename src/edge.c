@@ -97,7 +97,16 @@ static int initial_connection_complete = 0;
 /* Global flag set by signal handler to request graceful shutdown */
 static volatile int g_edge_running = 1;
 
-#ifndef _WIN32
+#ifdef _WIN32
+static BOOL WINAPI edge_console_ctrl_handler(DWORD ctrl_type) {
+    if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT ||
+        ctrl_type == CTRL_CLOSE_EVENT || ctrl_type == CTRL_SHUTDOWN_EVENT) {
+        g_edge_running = 0;
+        return TRUE;
+    }
+    return FALSE;
+}
+#else
 #include <signal.h>
 static void edge_signal_handler(int sig) {
     (void)sig;
@@ -4792,7 +4801,11 @@ int main(int argc, char* argv[])
     cap_free(caps_original);
 #endif
 
-#ifndef _WIN32
+#ifdef _WIN32
+    /* Register console control handler so Ctrl+C / console close triggers
+     * graceful shutdown and UPnP port cleanup. */
+    SetConsoleCtrlHandler(edge_console_ctrl_handler, TRUE);
+#else
     /* Register signal handlers early so SIGTERM/SIGINT always trigger
      * graceful shutdown and UPnP port cleanup, even during startup. */
     signal(SIGTERM, edge_signal_handler);
@@ -5665,16 +5678,6 @@ cleanup:
             if (p->sock6.family != 0) send_deregister(eee, &(p->sock6));
             p = p->next;
         }
-    }
-
-    if (eee->udp_sock != -1) {
-        closesocket(eee->udp_sock);
-        eee->udp_sock = -1;
-    }
-
-    if (eee->udp_sock6 != -1) {
-        closesocket(eee->udp_sock6);
-        eee->udp_sock6 = -1;
     }
 
     edge_deinit( eee );

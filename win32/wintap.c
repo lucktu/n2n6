@@ -352,9 +352,14 @@ ssize_t tuntap_read(struct tuntap_dev *tuntap, unsigned char *buf, size_t len) {
         return (ssize_t) read_size;
         break;
     default: {
-        W32_ERROR(last_err, error)
-        traceEvent(TRACE_ERROR, "ReadFile from TAP: %ls", error);
-        W32_ERROR_FREE(error)
+        /* ERROR_INVALID_HANDLE / ERROR_OPERATION_ABORTED are expected
+         * during normal shutdown when tuntap_close() closes the handle
+         * while the reader thread is blocked on ReadFile. */
+        if (last_err != ERROR_INVALID_HANDLE && last_err != ERROR_OPERATION_ABORTED) {
+            W32_ERROR(last_err, error)
+            traceEvent(TRACE_ERROR, "ReadFile from TAP: %ls", error);
+            W32_ERROR_FREE(error)
+        }
         break;
     }
     }

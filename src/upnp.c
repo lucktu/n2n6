@@ -24,15 +24,21 @@
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <mswsock.h>
 #  include <iphlpapi.h>
 #  pragma comment(lib, "iphlpapi.lib")
 #  pragma comment(lib, "ws2_32.lib")
 #  define close(s)               closesocket(s)
 #  define strncasecmp(a,b,n)     _strnicmp(a,b,n)
+/* Fallback if SIO_UDP_CONNRESET is not defined by the SDK */
+#  ifndef SIO_UDP_CONNRESET
+#    define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#  endif
 typedef int ssize_t;
 typedef int socklen_t;
 #else
 #  include <unistd.h>
+#  include <fcntl.h>
 #  include <sys/select.h>
 #  include <arpa/inet.h>
 #  include <netinet/in.h>
@@ -221,6 +227,17 @@ static int natpmp_map(uint16_t internal_port, uint16_t external_port,
     int sock = (int)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) return UPNP_ERR_SOCKET;
 
+#ifdef _WIN32
+    {
+        /* Prevent WSAECONNRESET error spam when ICMP port-unreachable
+         * arrives on this UDP socket. */
+        DWORD bytesReturned = 0;
+        BOOL newBehavior = FALSE;
+        WSAIoctl(sock, SIO_UDP_CONNRESET, &newBehavior, sizeof(newBehavior),
+                 NULL, 0, &bytesReturned, NULL, NULL);
+    }
+#endif
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family  = AF_INET;
@@ -324,6 +341,15 @@ static int pcp_map(uint16_t internal_port, uint16_t external_port,
 
     int sock = (int)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) return UPNP_ERR_SOCKET;
+
+#ifdef _WIN32
+    {
+        DWORD bytesReturned = 0;
+        BOOL newBehavior = FALSE;
+        WSAIoctl(sock, SIO_UDP_CONNRESET, &newBehavior, sizeof(newBehavior),
+                 NULL, 0, &bytesReturned, NULL, NULL);
+    }
+#endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -484,7 +510,7 @@ static int parse_url(const char *url, char *host, size_t host_len,
     return 0;
 }
 
-/* Blocking TCP request. Returns bytes received (>=0) or negative error. */
+/* Blocking TCP request with connect timeout. Returns bytes received (>=0) or negative error. */
 static int tcp_request(const char *host, uint16_t port,
                        const char *request, size_t req_len,
                        char *response, size_t resp_max)
@@ -502,21 +528,88 @@ static int tcp_request(const char *host, uint16_t port,
     int sock = (int)socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (sock < 0) { freeaddrinfo(res); return UPNP_ERR_SOCKET; }
 
+    /* Non-blocking connect with select() timeout so we don't hang on
+     * unreachable gateways (e.g. after WiFi switch). */
 #ifdef _WIN32
-    DWORD toms = UPNP_HTTP_TIMEOUT_SEC * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&toms, sizeof(toms));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&toms, sizeof(toms));
+    {
+        u_long mode = 1;
+        ioctlsocket(sock, FIONBIO, &mode);
+    }
 #else
-    struct timeval tv = { UPNP_HTTP_TIMEOUT_SEC, 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    {
+        int flags = fcntl(sock, F_GETFL, 0);
+        if (flags >= 0) fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    }
 #endif
 
-    if (connect(sock, res->ai_addr, (socklen_t)res->ai_addrlen) != 0) {
-        freeaddrinfo(res); close(sock);
-        return UPNP_ERR_TIMEOUT;
+    int conn_ret = connect(sock, res->ai_addr, (socklen_t)res->ai_addrlen);
+    if (conn_ret != 0) {
+#ifdef _WIN32
+        if (WSAGetLastError() != WSAEWOULDBLOCK)
+#else
+        if (errno != EINPROGRESS)
+#endif
+        {
+            freeaddrinfo(res); close(sock);
+            return UPNP_ERR_TIMEOUT;
+        }
+        /* Wait for connect to complete within timeout */
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET((unsigned)sock, &wfds);
+        struct timeval tv;
+        tv.tv_sec  = UPNP_HTTP_TIMEOUT_SEC;
+        tv.tv_usec = 0;
+        if (select(sock + 1, NULL, &wfds, NULL, &tv) <= 0) {
+            freeaddrinfo(res); close(sock);
+            return UPNP_ERR_TIMEOUT;
+        }
+        /* Verify connect succeeded (no pending error) */
+        {
+            int so_error = 0;
+            socklen_t len = sizeof(so_error);
+            getsockopt(sock, SOL_SOCKET, SO_ERROR,
+#ifdef _WIN32
+                       (char*)&so_error,
+#else
+                       &so_error,
+#endif
+                       &len);
+            if (so_error != 0) {
+                freeaddrinfo(res); close(sock);
+                return UPNP_ERR_TIMEOUT;
+            }
+        }
     }
     freeaddrinfo(res);
+
+    /* Restore blocking mode */
+#ifdef _WIN32
+    {
+        u_long mode = 0;
+        ioctlsocket(sock, FIONBIO, &mode);
+    }
+#else
+    {
+        int flags = fcntl(sock, F_GETFL, 0);
+        if (flags >= 0) fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+    }
+#endif
+
+    /* Set timeouts for recv/send */
+#ifdef _WIN32
+    {
+        DWORD toms = UPNP_HTTP_TIMEOUT_SEC * 1000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&toms, sizeof(toms));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&toms, sizeof(toms));
+    }
+#else
+    {
+        struct timeval tv = { UPNP_HTTP_TIMEOUT_SEC, 0 };
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+#endif
 
     /* Send full request */
     size_t sent = 0;
@@ -676,6 +769,24 @@ static int upnp_discover(void)
 
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (const char*)&yes, sizeof(yes));
+
+#ifdef _WIN32
+    {
+        DWORD bytesReturned = 0;
+        BOOL newBehavior = FALSE;
+        WSAIoctl(sock, SIO_UDP_CONNRESET, &newBehavior, sizeof(newBehavior),
+                 NULL, 0, &bytesReturned, NULL, NULL);
+    }
+#endif
+
+    /* Disable multicast loopback so we don't receive our own M-SEARCH
+     * packets. On Windows this can waste select() cycles and cause
+     * discovery to miss router responses. */
+    {
+        uint8_t loop = 0;
+        setsockopt(sock, IPPROTO_IP, IP_MULTICAST_LOOP,
+                   (const char*)&loop, sizeof(loop));
+    }
 
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
@@ -871,22 +982,25 @@ int upnp_map_port(uint16_t internal_port, uint16_t external_port,
 {
     uint16_t ext = external_port ? external_port : internal_port;
 
-    /* Priority: PCP > NAT-PMP > UPnP IGD */
+    /* Priority: UPnP IGD (most common) > PCP > NAT-PMP */
+    if (mapped_port) *mapped_port = ext;
+    if (upnp_igd_map(internal_port, ext, mapped_port, 0) == UPNP_OK)
+        return UPNP_OK;
+
     if (pcp_map(internal_port, ext, mapped_port, 0) == UPNP_OK)
         return UPNP_OK;
 
     if (natpmp_map(internal_port, ext, mapped_port, 0) == UPNP_OK)
         return UPNP_OK;
 
-    if (mapped_port) *mapped_port = ext;
-    return upnp_igd_map(internal_port, ext, mapped_port, 0);
+    return UPNP_ERR_NOTFOUND;
 }
 
 void upnp_unmap_port(uint16_t external_port)
 {
+    upnp_igd_map(external_port, external_port, NULL, 1);
     pcp_map(external_port, external_port, NULL, 1);
     natpmp_map(external_port, external_port, NULL, 1);
-    upnp_igd_map(external_port, external_port, NULL, 1);
 }
 
 int upnp_renew_port(uint16_t internal_port, uint16_t external_port)
