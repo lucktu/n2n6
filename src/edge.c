@@ -2680,67 +2680,12 @@ static int handle_PACKET( n2n_edge_t * eee,
             scan->last_seen = now;
         }
     } else {
-        /* Relayed packet from known peer.
-         * Check if sender's address changed - if so, move to pending
-         * for re-punch (relay now, re-punch in background). */
-        int addr_changed = 0;
-        if (orig_sender->family == AF_INET) {
-            if (scan->sock.family == AF_INET) {
-                if (sock_equal(&scan->sock, orig_sender) != 0)
-                    addr_changed = 1;
-            } else {
-                addr_changed = 1;
-            }
-        } else if (orig_sender->family == AF_INET6) {
-            if (scan->sock6.family == AF_INET6) {
-                if (sock_equal(&scan->sock6, orig_sender) != 0)
-                    addr_changed = 1;
-            } else {
-                addr_changed = 1;
-            }
-        }
-
-        if (addr_changed) {
-            macstr_t mac_buf2;
-            /* Only trigger re-punch for peers that are actively communicating.
-             * If this peer hasn't been seen recently, ignore the address change
-             * and let it be discovered naturally when communication resumes. */
-            time_t last_active = scan->last_seen;
-            if (scan->direct_seen > last_active) last_active = scan->direct_seen;
-            int actively_communicating = ((now - last_active) < (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_RETRY_INTERVAL));
-
-            if (actively_communicating) {
-                traceEvent(TRACE_INFO, "Relayed packet: %s addr changed, move to pending for re-punch",
-                           macaddr_str(mac_buf2, pkt->srcMac));
-
-                struct peer_info *prev = NULL, *s = eee->known_peers;
-                while (s && s != scan) { prev = s; s = s->next; }
-                if (s) {
-                    if (prev) prev->next = s->next;
-                    else eee->known_peers = s->next;
-                    s->next = eee->pending_peers;
-                    eee->pending_peers = s;
-                    s->punch_failed = 0;
-                    s->punch_start_time = 0;
-                    s->punch_retry_count = 0;
-                    s->punch_reset_time = 0;
-                    s->lan_punch_done = 0;
-                    s->lan_punch_start = 0;
-                    s->direct_seen = 0;
-                    s->last_probe_sent = 0;
-                    s->keepalive_fails = 0;
-                    s->register_retry_count = 0;
-                    s->psp_logged = 0;
-                    s->p2p_logged = 0;
-                    start_punch(eee, s);
-                }
-            } else {
-                traceEvent(TRACE_INFO, "Relayed packet: %s addr changed but not actively communicating, ignoring",
-                           macaddr_str(mac_buf2, pkt->srcMac));
-            }
-        } else {
-            scan->last_seen = now;
-        }
+        /* Relayed packet from known peer: update last_seen and continue.
+         * Do NOT compare orig_sender with peer's P2P address -- orig_sender
+         * is the supernode's address for relayed packets, not the peer's,
+         * so the comparison would always be a mismatch and falsely trigger
+         * a move to pending_peers, destroying the P2P path. */
+        scan->last_seen = now;
     }
     PEERS_UNLOCK(eee);
 
