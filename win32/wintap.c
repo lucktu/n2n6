@@ -413,8 +413,20 @@ void tuntap_close(struct tuntap_dev *tuntap) {
         tuntap->device_name[0] = '\0';
     }
     if (tuntap->device_handle != INVALID_HANDLE_VALUE) {
+        /* Cancel any pending I/O before closing the handle, so the TUN
+         * reader thread in tunReadThread can break out of WaitForSingleObject
+         * promptly rather than waiting for the 1-second timeout. */
+        CancelIo(tuntap->device_handle);
         CloseHandle(tuntap->device_handle);
         tuntap->device_handle = INVALID_HANDLE_VALUE;
+    }
+    if (tuntap->overlap_read.hEvent) {
+        CloseHandle(tuntap->overlap_read.hEvent);
+        tuntap->overlap_read.hEvent = NULL;
+    }
+    if (tuntap->overlap_write.hEvent) {
+        CloseHandle(tuntap->overlap_write.hEvent);
+        tuntap->overlap_write.hEvent = NULL;
     }
 }
 

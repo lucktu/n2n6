@@ -1837,12 +1837,13 @@ static int process_udp( n2n_sn_t * sss,
         {
             /* Already from a supernode. Nothing to modify, just pass to
              * destination. */
+            memcpy( &cmn2, &cmn, sizeof( n2n_common_t ) );
 
             rec_buf = udp_buf;
             encx = udp_size;
         }
 
-        try_forward( sss, &cmn, reg.dstMac, rec_buf, encx ); /* unicast only */
+        try_forward( sss, &cmn2, reg.dstMac, rec_buf, encx ); /* unicast only */
         }
         else
         {

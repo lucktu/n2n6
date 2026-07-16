@@ -1527,8 +1527,8 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
 
 #define KEEPALIVE_IDLE_SECONDS   12   /* send probe after this many seconds of silence */
 #define KEEPALIVE_RETRY_INTERVAL  4   /* seconds between retries */
-#define KEEPALIVE_MAX_FAILS       3   /* remove peer after this many consecutive failures */
-#define KEEPALIVE_TOTAL_TIMEOUT   (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_RETRY_INTERVAL * KEEPALIVE_MAX_FAILS)  /* 32s: give up after */
+#define KEEPALIVE_MAX_FAILS       3   /* fall back to relay after this many consecutive failures */
+#define KEEPALIVE_TOTAL_TIMEOUT   (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_RETRY_INTERVAL * KEEPALIVE_MAX_FAILS)  /* 32s */
 
 static void update_peer_address(n2n_edge_t * eee,
                                 uint8_t from_supernode,
@@ -1536,13 +1536,23 @@ static void update_peer_address(n2n_edge_t * eee,
                                 const n2n_sock_t * peer,
                                 time_t when);
 
-/** Send keepalive PROBEs to known_peers that have been silent too long,
- *  and remove peers that have failed KEEPALIVE_MAX_FAILS times. */
+/** @brief Check peer liveness and fall back to relay if P2P is dead.
+ *
+ *  For each peer in known_peers with established P2P (direct_seen > 0):
+ *  - If edge-level data is flowing (total TX/RX changed), skip keepalive.
+ *  - If idle too long, send PROBE directly to peer's P2P address.
+ *  - After KEEPALIVE_MAX_FAILS consecutive failures, clear P2P state
+ *    (direct_seen=0) so find_peer_destination falls back to relay.
+ *  - Peer stays in known_peers — relay works immediately while
+ *    QUERY_PEER re-establishes P2P in the background. */
 static void check_keepalive( n2n_edge_t * eee, time_t now )
 {
     struct peer_info *scan = eee->known_peers;
-    struct peer_info *prev = NULL;
     MACSTR_TMP(mac_tmp);
+
+    /* WS mode: skip P2P keepalive — all traffic goes via supernode */
+    if (eee->use_ws)
+        return;
 
     /* Per-peer keepalive: each peer is checked individually based on its own
      * last_seen time. A peer actively receiving traffic will not receive probes. */
@@ -1565,20 +1575,17 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                 eee->last_check_total_tx = cur_total_tx;
                 eee->last_check_total_rx = cur_total_rx;
                 scan->last_seen = now; /* prevent timeout */
-                prev = scan;
                 scan = next;
                 continue;
             }
         } else {
             /* P2P not yet established, no keepalive needed */
-            prev = scan;
             scan = next;
             continue;
         }
 
         /* Skip keepalive if this peer has received any traffic recently */
         if (idle < KEEPALIVE_IDLE_SECONDS) {
-            prev = scan;
             scan = next;
             continue;
         }
@@ -1594,7 +1601,6 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
         
         if ( !keepalive_addr ) {
             /* No valid address for keepalive */
-            prev = scan;
             scan = next;
             continue;
         }
@@ -1638,34 +1644,34 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                            scan->keepalive_fails, KEEPALIVE_MAX_FAILS);
 
                 if ( scan->keepalive_fails >= KEEPALIVE_MAX_FAILS ) {
-                    traceEvent(TRACE_NORMAL, "Keepalive: peer %s unreachable, moving to pending for re-punch",
+                    traceEvent(TRACE_NORMAL, "Keepalive: peer %s unreachable, clearing P2P state for relay",
                                PEER_ID(mac_tmp, scan));
-                    /* Remove from known_peers */
-                    if ( prev ) prev->next = next;
-                    else eee->known_peers = next;
-                    /* Move to pending_peers and re-punch */
-                    scan->next             = eee->pending_peers;
-                    eee->pending_peers     = scan;
-                    scan->punch_start_time = 0;
-                    scan->punch_failed     = 0;
-                    scan->punch_retry_count = 0;
-                    scan->punch_reset_time = 0;
-                    scan->keepalive_fails  = 0;
-                    scan->last_probe_sent  = 0;
-                    scan->lan_punch_start  = 0;
-                    scan->lan_punch_done   = 0;
-                    scan->direct_seen         = 0;
-                    scan->p2p_logged       = 0;
-                    scan->psp_logged       = 0;
+                    /*
+                     * Stay in known_peers — do NOT move to pending.
+                     * Clearing direct_seen causes find_peer_destination to
+                     * fall back to relay, which keeps the data path alive
+                     * while we re-punch in the background via QUERY_PEER.
+                     */
+                    scan->direct_seen        = 0;
+                    scan->punch_start_time   = 0;
+                    scan->punch_failed       = 0;
+                    scan->punch_retry_count  = 0;
+                    scan->punch_reset_time   = 0;
+                    scan->lan_punch_start    = 0;
+                    scan->lan_punch_done     = 0;
+                    scan->keepalive_fails    = 0;
+                    scan->last_probe_sent    = 0;
+                    scan->p2p_logged         = 0;
+                    scan->psp_logged         = 0;
                     send_query_peer(eee, scan->mac_addr);
                     start_punch(eee, scan);
+                    /* Keep scan in known_peers — relay works immediately */
                     scan = next;
                     continue;
                 }
             }
         }
 
-        prev = scan;
         scan = next;
     }
 }
@@ -2216,20 +2222,15 @@ static int find_peer_destination(n2n_edge_t * eee,
                 break;
             }
 
-            /* If no direct P2P communication for 15s, fall back to relay */
-            if (scan->direct_seen > 0 && (now - scan->direct_seen) >= 15) {
-                traceEvent(TRACE_DEBUG, "find_peer_destination: direct_seen timeout, using relay");
+            /* If keepalive probe is pending and total timeout exceeded, fall back to relay */
+            if (scan->last_probe_sent > 0 && (now - scan->last_seen) > KEEPALIVE_TOTAL_TIMEOUT) {
+                traceEvent(TRACE_DEBUG, "find_peer_destination: keepalive failed, using relay");
                 break;
             }
 
-            /* If keepalive probe is pending but peer was recently active, still use direct */
-            if (scan->last_probe_sent > 0 && (now - scan->last_seen) > KEEPALIVE_TOTAL_TIMEOUT) {
-                break; /* retval stays 0, use supernode as fallback */
-            }
-            
-            /* Single-channel routing: prefer IPv4 if available, fallback to IPv6 */
-            /* Each peer uses only ONE protocol stack (IPv4 or IPv6) */
-            /* IPv4 is more mature and has better NAT traversal reliability */
+            /* Keepalive is not probing (last_probe_sent == 0) — P2P path is alive.
+             * Use the direct P2P address regardless of direct_seen age.
+             * This keeps data and keepalive on the same path. */
             if (scan->sock.family == AF_INET && eee->udp_sock != -1) {
                 memcpy(destination, &scan->sock, sizeof(n2n_sock_t));
             } else if (scan->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
@@ -3866,6 +3867,8 @@ process_n2n_packet:
                 else
                 {
                     traceEvent( TRACE_WARNING, "Rx REGISTER_SUPER_ACK with wrong or old cookie." );
+                    /* SN restarted — force immediate re-registration */
+                    eee->last_register_req = 0;
                 }
             }
             else
