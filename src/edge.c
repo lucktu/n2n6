@@ -1551,9 +1551,26 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
         struct peer_info *next = scan->next;
         time_t idle = now - scan->last_seen;
 
-        /* Skip keepalive if bypass is active for this peer */
-        if (bypass_has_peers(eee->bp) && bypass_is_peer_active(eee->bp, scan->assigned_ip)) {
-            scan->last_seen = now; /* prevent timeout */
+        /* Only run keepalive for peers that have established P2P.
+         * For such peers: skip keepalive if edge-level data is flowing (n2n + bypass).
+         * Since bypass only operates after P2P is established, total byte
+         * throughput reliably indicates whether the connection is alive. */
+        if (scan->direct_seen > 0) {
+            size_t cur_total_tx = eee->p2p_tx_bytes + eee->super_tx_bytes
+                                + (eee->bp ? eee->bp->bp_tx_bytes : 0);
+            size_t cur_total_rx = eee->p2p_rx_bytes + eee->super_rx_bytes
+                                + (eee->bp ? eee->bp->bp_rx_bytes : 0);
+            if (cur_total_tx > eee->last_check_total_tx ||
+                cur_total_rx > eee->last_check_total_rx) {
+                eee->last_check_total_tx = cur_total_tx;
+                eee->last_check_total_rx = cur_total_rx;
+                scan->last_seen = now; /* prevent timeout */
+                prev = scan;
+                scan = next;
+                continue;
+            }
+        } else {
+            /* P2P not yet established, no keepalive needed */
             prev = scan;
             scan = next;
             continue;
@@ -2343,7 +2360,8 @@ static int send_PACKET( n2n_edge_t * eee,
             do_query = 1;
         } else {
             do_query = ((now - p->last_query_sent) >= 5);
-            p->last_query_sent = now;
+            if (do_query)
+                p->last_query_sent = now;
         }
         PEERS_UNLOCK(eee);
 

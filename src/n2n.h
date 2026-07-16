@@ -441,6 +441,10 @@ struct n2n_edge
     size_t              p2p_tx_bytes;
     size_t              p2p_rx_bytes;
 
+    /* Keepalive data-flow detection: snapshot of total TX/RX at last check */
+    size_t              last_check_total_tx;
+    size_t              last_check_total_rx;
+
 #ifdef _WIN32
     volatile int        keep_running;
     HANDLE              tun_thread_handle;
