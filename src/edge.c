@@ -372,7 +372,7 @@ static int edge_init(n2n_edge_t * eee)
     eee->last_resolve_check = 0;
     eee->bp_proxy_port = 0; /* will use default */
     eee->bp = NULL;
-    eee->bp_user_disabled = 0;
+    eee->bp_user_disabled = 1; /* default: bypass off */
 
     if(lzo_init() != LZO_E_OK)
     {
@@ -706,6 +706,7 @@ static void help() {
     printf("                         : host:port - direct address, common format (e.g. 1.2.3.4:5678)\n");
     printf("                         : host      - dns txt address (e.g. n2n6.ouno.eu.org, it's default).\n");
     printf("-4/-6                    | Resolve supernode DNS name as IPv4 or IPv6 (default: auto).\n");
+    printf("-b <port>                | Enable bypass (no port = default port %d).\n", BYPASS_DEFAULT_PORT);
 #if N2N_CAN_NAME_IFACE && !defined(_WIN32)
     printf("-d <tun device>          | Tun device name (optional)\n");
 #elif N2N_CAN_NAME_IFACE && defined(_WIN32)
@@ -731,7 +732,6 @@ static void help() {
     printf("-w                       | WebSocket mode: relay via supernode over WS (TCP), disable P2P.\n");
     printf("-Q <port>                | Query management port (for standalone use). (default: %d).\n", N2N_EDGE_MGMT_PORT);
     printf("-t <port|path>           | Management Socket (UDP Port or absolute path). (default: %d).\n", N2N_EDGE_MGMT_PORT);
-    printf("-x <port>                | Disable bypass (no port). Optionally set bypass port (default: %d).\n", BYPASS_DEFAULT_PORT);
     printf("-h                       | Show this help message.\n");
 
     printf("\nEnvironment variables:\n");
@@ -764,7 +764,7 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
              const char *why = (error == WSAENETUNREACH) ? "Network is unreachable" :
                                (error == WSAECONNRESET)  ? "Connection was reset"   :
                                                            "No route to host";
-             traceEvent( TRACE_WARNING, "sendto: %s (network change, harmless)", why );
+             traceEvent( TRACE_DEBUG, "sendto: %s (network change, harmless)", why );
          } else if ( error != WSAEFAULT && error != WSAEAFNOSUPPORT && error != WSAENOBUFS && error != WSAEWOULDBLOCK ) {
             const char *desc = "unknown";
             switch (error) {
@@ -2268,7 +2268,7 @@ static const struct option long_options[] = {
   { "egid",            required_argument, NULL, 'g' },
   { "help"   ,         no_argument,       NULL, 'h' },
   { "verbose",         no_argument,       NULL, 'v' },
-  { "no-bypass",       optional_argument, NULL, 'x' },
+  { "bypass",          optional_argument, NULL, 'b' },
   { NULL,              0,                 NULL,  0  }
 };
 
@@ -2919,14 +2919,14 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
                                 "  help    This help message\n"
                                 "  +       Increase verbosity of logging\n"
                                 "  -       Decrease verbosity of logging\n"
-                                "  x       Toggle bypass on/off\n"
+                                "  b       Toggle bypass on/off\n"
                                 "  <enter> Display statistics\n\n");
             sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
                    (struct sockaddr*) &sender_sock, i);
             return;
         }
 
-        if (recvlen >= 1 && 0 == memcmp(udp_buf, "x", 1)) {
+        if (recvlen >= 1 && 0 == memcmp(udp_buf, "b", 1)) {
             msg_len = 0;
             if (eee->bp) {
                 bypass_mgmt_toggle(eee->bp);
@@ -3178,7 +3178,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
         size_t total_tx = eee->super_tx_bytes + eee->p2p_tx_bytes;
         size_t total_rx = eee->super_rx_bytes + eee->p2p_rx_bytes;
         char ft[10], fr[10], fst[10], fsr[10], fpt[10], fpr[10];
-        if (eee->bp && eee->bp->enabled && !eee->bp->user_disabled) {
+        if (eee->bp && eee->bp->enabled) {
             total_tx += eee->bp->bp_tx_bytes;
             total_rx += eee->bp->bp_rx_bytes;
             char fbt[10], fbr[10];
@@ -4849,7 +4849,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
     optarg = NULL;
     while((opt = getopt_long(argc,
         argv,
-        "46K:k:a:bc:Eu:g:m:M:d:l:p:fvhrt:R:A:x::w", long_options, NULL
+        "46K:k:a:c:Eu:g:m:M:d:l:p:fvhrt:R:A:b::w", long_options, NULL
     )) != EOF) {
         switch (opt) {
         case '4':
@@ -4972,7 +4972,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
             help();
             exit(0);
 
-        case 'x': /* bypass port, -x alone disables bypass */
+        case 'b': /* bypass port, -b or -b PORT enables bypass */
             if (optarg) {
                 int bp_port = atoi(optarg);
                 if (bp_port > 0 && bp_port < 65536) {
@@ -4980,7 +4980,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
                     eee.bp_user_disabled = 0; /* port given = enable bypass */
                 }
             } else {
-                /* Check next argv for a numeric argument (support -x 1234) */
+                /* Check next argv for a numeric argument (support -b 1234) */
                 if (optind < argc) {
                     const char *next = argv[optind];
                     int isnum = 1;
@@ -4997,8 +4997,8 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
                         }
                     }
                 }
-                /* No numeric argument: disable bypass */
-                eee.bp_user_disabled = 1;
+                /* No numeric argument: enable bypass with default port */
+                eee.bp_user_disabled = 0;
             }
             break;
 

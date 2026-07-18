@@ -1137,10 +1137,6 @@ int bypass_handle_probe_frame(bypass_context_t *ctx, const uint8_t *frame,
         if (!initiator_wants)
             return 0; /* initiator doesn't want bypass, don't respond */
 
-        /* Hard veto: if we have -x, we refuse bypass regardless */
-        if (ctx->user_disabled)
-            return 0;
-
         /* Create peer entry if needed */
         bypass_peer_entry_t *pe = bypass_find_peer(ctx, sender_ip_host);
         if (!pe) {
@@ -1777,8 +1773,12 @@ void bypass_deinit(bypass_context_t *ctx)
 /** One-line bypass status (appended to main stat line) */
 void bypass_mgmt_oneline(bypass_context_t *ctx, char *buf, size_t bufsize)
 {
-    if (!ctx || !ctx->enabled || ctx->user_disabled) {
+    if (!ctx || !ctx->enabled) {
         snprintf(buf, bufsize, "bypass off");
+        return;
+    }
+    if (ctx->peer_count == 0) {
+        snprintf(buf, bufsize, "bypass off (peer has -x, no response from remote)");
         return;
     }
     snprintf(buf, bufsize, "bypass on %u | tx/rx %zu/%zu bytes",
@@ -1795,10 +1795,11 @@ void bypass_mgmt_status(bypass_context_t *ctx, char *buf, size_t bufsize)
     }
 
     pos += snprintf(buf + pos, bufsize - pos,
-                    "Bypass: %s (port %u)\n",
+                    "Bypass: %s (port %u)%s\n",
                     ctx->user_disabled ? "DISABLED" :
                     (ctx->enabled ? "ENABLED" : "UNAVAILABLE"),
-                    ctx->proxy_port);
+                    ctx->proxy_port,
+                    ctx->user_disabled && ctx->peer_count > 0 ? " (passive: peer-initiated)" : "");
 
     pos += snprintf(buf + pos, bufsize - pos,
                     "  TX: %zu bytes  RX: %zu bytes\n",
