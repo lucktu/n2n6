@@ -105,14 +105,11 @@ static int bypass_kcp_output(const char *buf, int len, ikcpcb *kcp, void *user)
     return len;
 }
 
-/** Monotonic milliseconds for KCP timing (cross-platform). */
+/** Monotonic milliseconds for KCP timing. */
 static IUINT64 bypass_monotonic_ms(void)
 {
 #ifdef _WIN32
-    static ULONGLONG first = 0;
-    ULONGLONG now = GetTickCount64();
-    if (first == 0) first = now;
-    return now - first;
+    return (IUINT64)GetTickCount64();
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -644,22 +641,11 @@ void bypass_handle_local_read(bypass_context_t *ctx, int idx)
     if (c->fin_sent)
         return;
 
-    /* Graduated backpressure: progressively reduce per-cycle read limit
-     * as KCP pipeline fills. Thresholds and divisors in bypass.h.
-     *   waitsnd < THR_HALF:       full speed
-     *   waitsnd THR_HALF-THR_SLOW: max_read_limit / HALF_DIV
-     *   waitsnd THR_SLOW-99%:      max_read_limit / SLOW_DIV
-     *   waitsnd >= 100%:           stop */
-    size_t read_limit = (c->kcp && c->max_read_limit) ? c->max_read_limit : BYPASS_MAX_PAYLOAD;
-    if (c->kcp) {
-        int ws = ikcp_waitsnd(c->kcp);
-        if (ws >= c->snd_wnd)
-            return;
-        if (ws >= c->snd_wnd * BYPASS_BP_THR_SLOW / 100)
-            read_limit = read_limit / BYPASS_BP_SLOW_DIV;
-        else if (ws >= c->snd_wnd * BYPASS_BP_THR_HALF / 100)
-            read_limit = read_limit / BYPASS_BP_HALF_DIV;
-    }
+    /* Simple backpressure: stop only when KCP pipeline is full.
+     * KCP's built-in congestion control and snd_wnd handle the rest. */
+    if (c->kcp && ikcp_waitsnd(c->kcp) >= c->snd_wnd)
+        return;
+    size_t read_limit = BYPASS_MAX_PAYLOAD;
     size_t total = 0;
     int eof = 0;
 
@@ -1209,29 +1195,14 @@ void bypass_start_negotiation(bypass_context_t *ctx, struct peer_info *peer)
 
     bypass_peer_entry_t *pe = bypass_find_peer(ctx, peer->assigned_ip);
     if (pe) {
-        if (pe->state == BYPASS_PEER_ACTIVE) {
-            /* Already active — nothing to do (bypass_tick keeps is_lan in sync). */
-            return;
-        }
-        if (pe->state == BYPASS_PEER_PROBING ||
-            pe->state == BYPASS_PEER_CAPABLE ||
-            pe->state == BYPASS_PEER_TESTING) {
-            /* Already negotiating, don't restart. */
-            return;
-        }
-        /* NONE or UNAVAILABLE: peer entry exists but not negotiating.
-         * Restart negotiation with fresh address.
-         * Do NOT increment peer_count — slot already allocated. */
-        traceEvent(TRACE_INFO, "bypass: peer %s was %s, restarting negotiation",
-                   inet_ntoa((struct in_addr){htonl(peer->assigned_ip)}),
-                   pe->state == BYPASS_PEER_UNAVAILABLE ? "UNAVAILABLE" : "NONE");
-    } else {
-        /* Allocate new peer entry */
-        pe = bypass_alloc_peer(ctx);
-        if (!pe)
-            return;
-        ctx->peer_count++;
+        /* Already exists. ACTIVE → nothing to do. Other states → already negotiating. */
+        return;
     }
+
+    /* Allocate peer entry */
+    pe = bypass_alloc_peer(ctx);
+    if (!pe)
+        return;
 
     /* Get peer's direct address */
     n2n_sock_t peer_addr;
@@ -1400,29 +1371,9 @@ void bypass_tick(bypass_context_t *ctx, time_t now)
         case BYPASS_PEER_ACTIVE:
             /* Keep is_lan in sync with peer_info: sockets[1] may become
              * available after initial negotiation (PEER_INFO arrives late).
-             * Once is_lan=1 it stays 1 (LAN never reverts to WAN).
-             *
-             * Also check peer's last_seen from n2n: if peer went silent
-             * (e.g., restarted without DEREGISTER), transition to UNAVAILABLE
-             * so bypass can be restarted when peer reconnects. */
+             * Once is_lan=1 it stays 1 (LAN never reverts to WAN). */
             if (!pe->is_lan)
                 pe->is_lan = bypass_is_lan_peer(ctx, pe->virt_ip);
-            {
-                struct peer_info *pi = bypass_find_peer_info(ctx->edge, pe->virt_ip);
-                if (pi && (now - pi->last_seen) > 150) {  /* REGISTRATION_TIMEOUT (150s) */
-                    /* Peer went silent in n2n layer. Reset to UNAVAILABLE. */
-                    bypass_del_peer_rule(ctx, pe->virt_ip);
-                    for (int i = 0; i < BYPASS_MAX_CONNS; i++) {
-                        if (ctx->conns[i].state != BYPASS_CONN_FREE &&
-                            ctx->conns[i].remote_virt_ip == pe->virt_ip)
-                            bypass_free_conn(ctx, i);
-                    }
-                    pe->state = BYPASS_PEER_UNAVAILABLE;
-                    pe->state_time = now;
-                    traceEvent(TRACE_INFO, "bypass: peer %s went silent, now UNAVAILABLE",
-                               inet_ntoa((struct in_addr){htonl(pe->virt_ip)}));
-                }
-            }
             break;
         }
     }

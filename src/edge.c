@@ -5169,30 +5169,24 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
     if (strlen(ip_addr) > 0) inet_pton(AF_INET, ip_addr, &tuntap_config.ip_addr);
     tuntap_config.ip_prefixlen = ip_prefixlen;
 
-    /* Check if local system already has this IP on any interface */
+    /* Prevent multiple local processes with the same IP.
+     * On Windows: use a named mutex (auto-released on process exit).
+     * On Linux: TAP is destroyed on exit, use interface scan. */
     if (strlen(ip_addr) > 0 && default_ip_assignment == 0) {
-        int ip_conflict = 0;
-        uint32_t target_ip = tuntap_config.ip_addr;
 #ifdef _WIN32
-        ULONG buflen = 15000;
-        IP_ADAPTER_ADDRESSES *pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(buflen);
-        if (pAddresses && GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, pAddresses, &buflen) == NO_ERROR) {
-            IP_ADAPTER_ADDRESSES *pCurr = pAddresses;
-            while (pCurr && !ip_conflict) {
-                IP_ADAPTER_UNICAST_ADDRESS *pUnicast = pCurr->FirstUnicastAddress;
-                while (pUnicast && !ip_conflict) {
-                    if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
-                        struct sockaddr_in *pAddr = (struct sockaddr_in *)pUnicast->Address.lpSockaddr;
-                        if (pAddr->sin_addr.s_addr == target_ip)
-                            ip_conflict = 1;
-                    }
-                    pUnicast = pUnicast->Next;
-                }
-                pCurr = pCurr->Next;
+        char mutex_name[64];
+        snprintf(mutex_name, sizeof(mutex_name), "Global\\n2n_edge_%s", ip_addr);
+        HANDLE hMutex = CreateMutexA(NULL, TRUE, mutex_name);
+        if (hMutex) {
+            if (GetLastError() == ERROR_ALREADY_EXISTS) {
+                CloseHandle(hMutex);
+                traceEvent(TRACE_ERROR, "IP address %s already in use on this machine, exiting", ip_addr);
+                exit(1);
             }
         }
-        free(pAddresses);
 #else
+        int ip_conflict = 0;
+        uint32_t target_ip = tuntap_config.ip_addr;
         struct ifaddrs *ifaddr, *ifa;
         if (getifaddrs(&ifaddr) == 0) {
             for (ifa = ifaddr; ifa != NULL && !ip_conflict; ifa = ifa->ifa_next) {
@@ -5204,11 +5198,11 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
             }
             freeifaddrs(ifaddr);
         }
-#endif
         if (ip_conflict) {
-            traceEvent(TRACE_ERROR, "IP address %s is already in use on this machine, exiting", ip_addr);
+            traceEvent(TRACE_ERROR, "IP address %s already in use on this machine, exiting", ip_addr);
             exit(1);
         }
+#endif
     }
 
     if (ip6_addr[0] != '\0') {
