@@ -2054,6 +2054,43 @@ static int process_udp( n2n_sn_t * sss,
         const n2n_sock_t *local_sock_ptr = (reg.aflags & N2N_AFLAGS_LOCAL_SOCKET) ? &reg.local_sock : NULL;
         uint8_t local_sock_ena = (reg.aflags & N2N_AFLAGS_LOCAL_SOCKET) ? 1 : 0;
 
+        /* Check IP conflict: different MAC, same IP in same community */
+        if (use_request_ip && use_requested_ip != 0) {
+            struct peer_info *ck = sss->edges;
+            while (ck) {
+                if (ck->assigned_ip == use_requested_ip &&
+                    memcmp(ck->community_name, cmn.community, sizeof(n2n_community_t)) == 0 &&
+                    memcmp(ck->mac_addr, reg.edgeMac, sizeof(n2n_mac_t)) != 0) {
+                    n2n_common_t nak_cmn;
+                    n2n_REGISTER_SUPER_NAK_t nak;
+
+                    memset(&nak_cmn, 0, sizeof(nak_cmn));
+                    nak_cmn.ttl = N2N_DEFAULT_TTL;
+                    nak_cmn.pc = n2n_register_super_nak;
+                    nak_cmn.flags = N2N_FLAGS_FROM_SUPERNODE;
+                    memcpy(nak_cmn.community, cmn.community, sizeof(n2n_community_t));
+                    memcpy(&nak.cookie, &reg.cookie, sizeof(n2n_cookie_t));
+
+                    encx = 0;
+                    encode_REGISTER_SUPER_NAK(ackbuf, &encx, &nak_cmn, &nak);
+
+                    if (ws_sender) {
+                        ws_send(ws_sender, ackbuf, encx);
+                    } else {
+                        SOCKET send_sock = (sender_sock->sa_family == AF_INET6) ? sss->sock6 : sss->sock;
+                        sendto(send_sock, ackbuf, encx, 0, (struct sockaddr *)sender_sock,
+                               (sender_sock->sa_family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
+                    }
+                    ++(sss->stats.reg_super_nak);
+                    traceEvent(TRACE_WARNING, "IP %u.%u.%u.%u already used by another edge, sending NAK",
+                               (use_requested_ip>>24)&0xFF, (use_requested_ip>>16)&0xFF,
+                               (use_requested_ip>>8)&0xFF, use_requested_ip&0xFF);
+                    return 0;
+                }
+                ck = ck->next;
+            }
+        }
+
         int is_new_edge = update_edge( sss, reg.edgeMac, cmn.community, &(ack.sock),
                      local_sock_ptr, local_sock_ena,
                      now, NULL, NULL, use_request_ip, use_requested_ip );

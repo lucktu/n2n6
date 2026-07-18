@@ -364,6 +364,11 @@ size_t decode_REGISTER_SUPER_ACK( n2n_REGISTER_SUPER_ACK_t * reg,
                                size_t * rem,
                                size_t * idx );
 
+size_t encode_REGISTER_SUPER_NAK( uint8_t * base,
+                                   size_t * idx,
+                                   const n2n_common_t * cmn,
+                                   const n2n_REGISTER_SUPER_NAK_t * nak );
+
 int fill_sockaddr( struct sockaddr * addr,
                    size_t addrlen,
                    const n2n_sock_t * sock );

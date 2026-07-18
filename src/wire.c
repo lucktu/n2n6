@@ -490,6 +490,17 @@ size_t decode_REGISTER_SUPER_ACK( n2n_REGISTER_SUPER_ACK_t * reg,
     return retval;
 }
 
+size_t encode_REGISTER_SUPER_NAK( uint8_t * base,
+                                   size_t * idx,
+                                   const n2n_common_t * common,
+                                   const n2n_REGISTER_SUPER_NAK_t * nak )
+{
+    size_t retval = 0;
+    retval += encode_common( base, idx, common );
+    retval += encode_buf( base, idx, nak->cookie, N2N_COOKIE_SIZE );
+    return retval;
+}
+
 int fill_sockaddr( struct sockaddr * addr,
                    size_t addrlen,
                    const n2n_sock_t * sock )

@@ -3753,6 +3753,19 @@ process_n2n_packet:
 
             PEERS_UNLOCK(eee);
         }
+        else if(msg_type == MSG_TYPE_REGISTER_SUPER_NAK)
+        {
+            n2n_REGISTER_SUPER_NAK_t nak;
+            decode_buf(nak.cookie, N2N_COOKIE_SIZE, udp_buf, &rem, &idx);
+
+            if (eee->sn_wait || eee->sn_ack_count > 0) {
+                if (0 == memcmp(nak.cookie, eee->last_cookie, N2N_COOKIE_SIZE)) {
+                    traceEvent(TRACE_ERROR, "%s already in use by other, exiting",
+                               inet_ntoa(*(struct in_addr*)&eee->device.ip_addr));
+                    exit(1);
+                }
+            }
+        }
         else if(msg_type == MSG_TYPE_REGISTER_SUPER_ACK)
         {
             n2n_REGISTER_SUPER_ACK_t ra;
@@ -5155,6 +5168,49 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
     tuntap_config.dyn_ip4 = eee.dyn_ip_mode;
     if (strlen(ip_addr) > 0) inet_pton(AF_INET, ip_addr, &tuntap_config.ip_addr);
     tuntap_config.ip_prefixlen = ip_prefixlen;
+
+    /* Check if local system already has this IP on any interface */
+    if (strlen(ip_addr) > 0 && default_ip_assignment == 0) {
+        int ip_conflict = 0;
+        uint32_t target_ip = tuntap_config.ip_addr;
+#ifdef _WIN32
+        ULONG buflen = 15000;
+        IP_ADAPTER_ADDRESSES *pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(buflen);
+        if (pAddresses && GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, pAddresses, &buflen) == NO_ERROR) {
+            IP_ADAPTER_ADDRESSES *pCurr = pAddresses;
+            while (pCurr && !ip_conflict) {
+                IP_ADAPTER_UNICAST_ADDRESS *pUnicast = pCurr->FirstUnicastAddress;
+                while (pUnicast && !ip_conflict) {
+                    if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
+                        struct sockaddr_in *pAddr = (struct sockaddr_in *)pUnicast->Address.lpSockaddr;
+                        if (pAddr->sin_addr.s_addr == target_ip)
+                            ip_conflict = 1;
+                    }
+                    pUnicast = pUnicast->Next;
+                }
+                pCurr = pCurr->Next;
+            }
+        }
+        free(pAddresses);
+#else
+        struct ifaddrs *ifaddr, *ifa;
+        if (getifaddrs(&ifaddr) == 0) {
+            for (ifa = ifaddr; ifa != NULL && !ip_conflict; ifa = ifa->ifa_next) {
+                if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET) {
+                    struct sockaddr_in *pAddr = (struct sockaddr_in *)ifa->ifa_addr;
+                    if (pAddr->sin_addr.s_addr == target_ip)
+                        ip_conflict = 1;
+                }
+            }
+            freeifaddrs(ifaddr);
+        }
+#endif
+        if (ip_conflict) {
+            traceEvent(TRACE_ERROR, "IP address %s is already in use on this machine, exiting", ip_addr);
+            exit(1);
+        }
+    }
+
     if (ip6_addr[0] != '\0') {
         if (inet_pton(AF_INET6, ip6_addr, &tuntap_config.ip6_addr) != 1)
             traceEvent(TRACE_ERROR, "invalid ipv6 address: %s", ip6_addr);
