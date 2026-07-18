@@ -2537,17 +2537,25 @@ retry:
     {
 #ifdef _WIN32
         DWORD err = GetLastError();
-        W32_ERROR(err, error);
-        traceEvent(TRACE_WARNING, "read()=%d [%d/%ls]", (signed int)len, err, error);
-        W32_ERROR_FREE(error);
         if (ERROR_OPERATION_ABORTED == err) {
+            /* If the process is shutting down, don't restart - just exit. */
+            if (!eee->keep_running)
+                return;
 retry2:
             traceEvent(TRACE_NORMAL, "Restart TAP device");
             if (tuntap_restart( &eee->device ) < 0) {
+                if (!eee->keep_running)
+                    return;
                 Sleep(2000);
                 goto retry2;
             }
             goto retry;
+        }
+        /* Non-critical errors (no data, etc.) are normal when idle. */
+        if (err != ERROR_NO_DATA && err != ERROR_HANDLE_EOF) {
+            W32_ERROR(err, error);
+            traceEvent(TRACE_DEBUG, "read()=%d [%d/%ls]", (signed int)len, err, error);
+            W32_ERROR_FREE(error);
         }
 #else
         if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
@@ -5657,7 +5665,8 @@ cleanup:
     /* Close TAP first to wake up the TUN reader thread blocked on tuntap_read() */
     tuntap_close(&(eee->device));
     if (eee->tun_thread_handle != NULL) {
-        WaitForSingleObject(eee->tun_thread_handle, INFINITE);
+        if (WaitForSingleObject(eee->tun_thread_handle, 5000) != WAIT_OBJECT_0)
+            traceEvent(TRACE_WARNING, "TUN thread did not exit in 5s, terminating");
         CloseHandle(eee->tun_thread_handle);
         eee->tun_thread_handle = NULL;
     }

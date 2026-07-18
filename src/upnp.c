@@ -767,6 +767,24 @@ static int upnp_discover(void)
     int sock = (int)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) return UPNP_ERR_SOCKET;
 
+    /* Bind SSDP socket to the local IP of the default route interface and
+     * set IP_MULTICAST_IF so multicast M-SEARCH packets go out via the
+     * physical NIC. Without this, Windows may route multicast to the TAP
+     * virtual interface and SSDP discovery fails (~50% success rate). */
+    {
+        char local_ip[INET_ADDRSTRLEN] = "0.0.0.0";
+        get_local_ip(local_ip, sizeof(local_ip));
+        struct sockaddr_in local_addr;
+        memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.sin_family = AF_INET;
+        local_addr.sin_port   = 0;
+        inet_pton(AF_INET, local_ip, &local_addr.sin_addr);
+        bind(sock, (struct sockaddr*)&local_addr, sizeof(local_addr));
+        setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
+                   (const char*)&local_addr.sin_addr,
+                   sizeof(local_addr.sin_addr));
+    }
+
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (const char*)&yes, sizeof(yes));
 
@@ -927,7 +945,8 @@ static int upnp_igd_map(uint16_t internal_port, uint16_t external_port,
     };
 
     int ret = UPNP_ERR_RESPONSE;
-    for (int i = 0; svc_types[i]; i++) {
+    int max_svcs = del ? 1 : 3; /* deleting: only need 1 attempt */
+    for (int i = 0; svc_types[i] && i < max_svcs; i++) {
         if (del) {
             char args[256];
             snprintf(args, sizeof(args),

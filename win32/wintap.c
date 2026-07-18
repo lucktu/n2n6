@@ -338,28 +338,35 @@ int tuntap_open(struct tuntap_dev *device, struct tuntap_config* config) {
 /* ************************************************ */
 
 ssize_t tuntap_read(struct tuntap_dev *tuntap, unsigned char *buf, size_t len) {
-    uint32_t read_size, last_err;
+    uint32_t read_size = 0, last_err;
 
     ResetEvent(tuntap->overlap_read.hEvent);
     if (ReadFile(tuntap->device_handle, buf, (uint32_t) len, &read_size, &tuntap->overlap_read)) {
-        //printf("tun_read(len=%d)\n", read_size);
         return (ssize_t) read_size;
     }
     switch (last_err = GetLastError()) {
     case ERROR_IO_PENDING:
-        WaitForSingleObject(tuntap->overlap_read.hEvent, INFINITE);
-        GetOverlappedResult(tuntap->device_handle, &tuntap->overlap_read, &read_size, FALSE);
-        return (ssize_t) read_size;
-        break;
-    default: {
-        /* ERROR_INVALID_HANDLE / ERROR_OPERATION_ABORTED are expected
-         * during normal shutdown when tuntap_close() closes the handle
-         * while the reader thread is blocked on ReadFile. */
-        if (last_err != ERROR_INVALID_HANDLE && last_err != ERROR_OPERATION_ABORTED) {
-            W32_ERROR(last_err, error)
-            traceEvent(TRACE_ERROR, "ReadFile from TAP: %ls", error);
-            W32_ERROR_FREE(error)
+        if (WaitForSingleObject(tuntap->overlap_read.hEvent, 1000) != WAIT_OBJECT_0) {
+            /* No data available within 1 second. Cancel the pending read
+             * so the OVERLAPPED structure is clean for the next call,
+             * then return -1 so the caller can re-check keep_running. */
+            CancelIo(tuntap->device_handle);
+            WaitForSingleObject(tuntap->overlap_read.hEvent, INFINITE);
+            return -1;
         }
+        if (!GetOverlappedResult(tuntap->device_handle, &tuntap->overlap_read, &read_size, FALSE)) {
+            DWORD last_err2 = GetLastError();
+            if (last_err2 != ERROR_OPERATION_ABORTED && last_err2 != ERROR_INVALID_HANDLE) {
+                W32_ERROR(last_err2, error)
+                traceEvent(TRACE_ERROR, "GetOverlappedResult TAP: %ls", error);
+                W32_ERROR_FREE(error)
+            }
+            return -1;
+        }
+        return (ssize_t) read_size;
+    default: {
+        /* Non-critical errors are normal when the TAP device is idle
+         * or during shutdown. The caller handles this silently. */
         break;
     }
     }
@@ -387,7 +394,8 @@ ssize_t tuntap_write(struct tuntap_dev *tuntap, unsigned char *buf, size_t len) 
     switch (GetLastError()) {
     case ERROR_IO_PENDING:
         WaitForSingleObject(tuntap->overlap_write.hEvent, INFINITE);
-        GetOverlappedResult(tuntap->device_handle, &tuntap->overlap_write, &write_size, FALSE);
+        if (!GetOverlappedResult(tuntap->device_handle, &tuntap->overlap_write, &write_size, FALSE))
+            write_size = 0;
         LeaveCriticalSection(&tuntap->write_lock);
         return (ssize_t) write_size;
     default:
@@ -404,7 +412,10 @@ void tuntap_close(struct tuntap_dev *tuntap) {
     if (tuntap->device_name) {
         tuntap->device_name[0] = '\0';
     }
-    CloseHandle(tuntap->device_handle);
+    if (tuntap->device_handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(tuntap->device_handle);
+        tuntap->device_handle = INVALID_HANDLE_VALUE;
+    }
 }
 
 int tuntap_restart( tuntap_dev* device ) {
@@ -413,7 +424,10 @@ int tuntap_restart( tuntap_dev* device ) {
     uint32_t rc;
     long len;
 
-    CloseHandle(device->device_handle);
+    if (device->device_handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(device->device_handle);
+        device->device_handle = INVALID_HANDLE_VALUE;
+    }
 
     ResetEvent(device->overlap_write.hEvent);
     ResetEvent(device->overlap_read.hEvent);
