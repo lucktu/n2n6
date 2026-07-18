@@ -764,7 +764,7 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
              const char *why = (error == WSAENETUNREACH) ? "Network is unreachable" :
                                (error == WSAECONNRESET)  ? "Connection was reset"   :
                                                            "No route to host";
-             traceEvent( TRACE_DEBUG, "sendto: %s (network change, harmless)", why );
+             traceEvent( TRACE_WARNING, "sendto: %s (network change, harmless)", why );
          } else if ( error != WSAEFAULT && error != WSAEAFNOSUPPORT && error != WSAENOBUFS && error != WSAEWOULDBLOCK ) {
             const char *desc = "unknown";
             switch (error) {
@@ -3440,6 +3440,15 @@ process_n2n_packet:
                         } else {
                             scan->last_seen = n2n_now();
                         }
+                    }
+                    /* Update version/os_name from REGISTER */
+                    if (reg.version[0] != '\0') {
+                        strncpy(scan->version, reg.version, sizeof(scan->version) - 1);
+                        scan->version[sizeof(scan->version) - 1] = '\0';
+                    }
+                    if (reg.os_name[0] != '\0') {
+                        strncpy(scan->os_name, reg.os_name, sizeof(scan->os_name) - 1);
+                        scan->os_name[sizeof(scan->os_name) - 1] = '\0';
                     }
                     /* Peer already in known_peers - don't reset bypass state.
                      * If peer restarted with different bypass preference,

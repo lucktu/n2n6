@@ -1923,6 +1923,15 @@ static int process_udp( n2n_sn_t * sss,
             if (target->same_lan_as_sn) {
                 pi.aflags |= N2N_AFLAGS_SAME_LAN_AS_SN;
             }
+            /* Include version and os_name so edge can display them */
+            if (target->version[0] != '\0') {
+                strncpy(pi.version, target->version, sizeof(pi.version) - 1);
+                pi.version[sizeof(pi.version) - 1] = '\0';
+            }
+            if (target->os_name[0] != '\0') {
+                strncpy(pi.os_name, target->os_name, sizeof(pi.os_name) - 1);
+                pi.os_name[sizeof(pi.os_name) - 1] = '\0';
+            }
 
             encode_PEER_INFO( encbuf, &encx, &cmn2, &pi );
             {
@@ -1967,6 +1976,15 @@ static int process_udp( n2n_sn_t * sss,
                 }
                 if (requester->same_lan_as_sn) {
                     pi2.aflags |= N2N_AFLAGS_SAME_LAN_AS_SN;
+                }
+                /* Include version and os_name so edge can display them */
+                if (requester->version[0] != '\0') {
+                    strncpy(pi2.version, requester->version, sizeof(pi2.version) - 1);
+                    pi2.version[sizeof(pi2.version) - 1] = '\0';
+                }
+                if (requester->os_name[0] != '\0') {
+                    strncpy(pi2.os_name, requester->os_name, sizeof(pi2.os_name) - 1);
+                    pi2.os_name[sizeof(pi2.os_name) - 1] = '\0';
                 }
 
                 encode_PEER_INFO( encbuf2, &encx2, &cmn3, &pi2 );
