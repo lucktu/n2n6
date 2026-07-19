@@ -263,7 +263,7 @@ int tuntap_open(struct tuntap_dev *device, struct tuntap_config* config) {
 
         if (rc != 0) {
             W32_ERROR(rc, error)
-            traceEvent(TRACE_WARNING, "Unable to set device %ls IP address: %u", adaptername, error);
+            traceEvent(TRACE_DEBUG, "Unable to set device %ls IP address: %u", adaptername, error);
             W32_ERROR_FREE(error)
             CloseHandle(device->device_handle);
             device->device_handle = INVALID_HANDLE_VALUE;

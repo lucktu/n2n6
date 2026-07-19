@@ -764,7 +764,7 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
              const char *why = (error == WSAENETUNREACH) ? "Network is unreachable" :
                                (error == WSAECONNRESET)  ? "Connection was reset"   :
                                                            "No route to host";
-             traceEvent( TRACE_WARNING, "sendto: %s (network change, harmless)", why );
+             traceEvent( TRACE_DEBUG, "sendto: %s (network change, harmless)", why );
          } else if ( error != WSAEFAULT && error != WSAEAFNOSUPPORT && error != WSAENOBUFS && error != WSAEWOULDBLOCK ) {
             const char *desc = "unknown";
             switch (error) {
@@ -2820,28 +2820,32 @@ static int handle_PACKET( n2n_edge_t * eee,
 
 /** Format bytes with auto-scaled unit: B, K, M, G. */
 static void fmt_bytes(char *buf, size_t bufsize, size_t bytes) {
-    if (bytes == 0) {
+    unsigned long b = (unsigned long)bytes;
+    if (b == 0) {
         snprintf(buf, bufsize, "0");
-    } else if (bytes < 1024) {
-        snprintf(buf, bufsize, "%zuB", bytes);
-    } else if (bytes < 1024 * 1024) {
-        double k = (double)bytes / 1024.0;
-        if (k < 10.0)
-            snprintf(buf, bufsize, "%.1fK", k);
+    } else if (b < 1024) {
+        snprintf(buf, bufsize, "%luB", b);
+    } else if (b < 1024ul * 1024) {
+        unsigned long k = b / 1024;
+        unsigned long d = (b % 1024) * 10 / 1024;
+        if (k < 10 || d > 0)
+            snprintf(buf, bufsize, "%lu.%luK", k, d);
         else
-            snprintf(buf, bufsize, "%.0fK", k);
-    } else if (bytes < (size_t)1024 * 1024 * 1024) {
-        double m = (double)bytes / (1024.0 * 1024.0);
-        if (m < 10.0)
-            snprintf(buf, bufsize, "%.1fM", m);
+            snprintf(buf, bufsize, "%luK", k);
+    } else if (b < 1024ul * 1024 * 1024) {
+        unsigned long m = b / (1024ul * 1024);
+        unsigned long d = (b % (1024ul * 1024)) * 10 / (1024ul * 1024);
+        if (m < 10 || d > 0)
+            snprintf(buf, bufsize, "%lu.%luM", m, d);
         else
-            snprintf(buf, bufsize, "%.0fM", m);
+            snprintf(buf, bufsize, "%luM", m);
     } else {
-        double g = (double)bytes / (1024.0 * 1024.0 * 1024.0);
-        if (g < 10.0)
-            snprintf(buf, bufsize, "%.1fG", g);
+        unsigned long g = b / (1024ul * 1024 * 1024);
+        unsigned long d = (b % (1024ul * 1024 * 1024)) * 10 / (1024ul * 1024 * 1024);
+        if (g < 10 || d > 0)
+            snprintf(buf, bufsize, "%lu.%luG", g, d);
         else
-            snprintf(buf, bufsize, "%.0fG", g);
+            snprintf(buf, bufsize, "%luG", g);
     }
 }
 
@@ -2987,8 +2991,8 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
 
     /* Send header */
     msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                       " id  mac                virt_ip          wan_ip                                            ver      os\n");
-    msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                       " id  mac                n2n_ip           wan_ip                                            ver      os\n");
+	msg_len += snprintf((char*) (udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
                         "---v2.3----------------------------------------------------------------------------------------------------\n");
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
@@ -3134,11 +3138,11 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
     msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                       "  l* |  %s | v%s | conn:%s | sn_caps:%s\n",
+                       "  l* |  %s | v%s | supp:%s | conn:%s\n",
                        eee->sn_ip_array[eee->sn_idx],
                        eee->supernode_version,
-                       (eee->supernode.family == AF_INET6) ? "IPv6" : "IPv4",
-                       sn_support);
+                       sn_support,
+                       (eee->supernode.family == AF_INET6) ? "IPv6" : "IPv4");
     sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
            (struct sockaddr*) &sender_sock, i);
 
@@ -3177,11 +3181,11 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     {
         size_t total_tx = eee->super_tx_bytes + eee->p2p_tx_bytes;
         size_t total_rx = eee->super_rx_bytes + eee->p2p_rx_bytes;
-        char ft[10], fr[10], fst[10], fsr[10], fpt[10], fpr[10];
+        char ft[16], fr[16], fst[16], fsr[16], fpt[16], fpr[16];
         if (eee->bp && eee->bp->enabled) {
             total_tx += eee->bp->bp_tx_bytes;
             total_rx += eee->bp->bp_rx_bytes;
-            char fbt[10], fbr[10];
+            char fbt[16], fbr[16];
             fmt_bytes(ft, sizeof(ft), total_tx);
             fmt_bytes(fr, sizeof(fr), total_rx);
             fmt_bytes(fst, sizeof(fst), eee->super_tx_bytes);
@@ -3191,7 +3195,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             fmt_bytes(fbt, sizeof(fbt), eee->bp->bp_tx_bytes);
             fmt_bytes(fbr, sizeof(fbr), eee->bp->bp_rx_bytes);
             msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                               "Tx/rx: total %s/%s | super %s/%s | p2p %s/%s"
+                               "Tx/rx: total %s/%s | psp %s/%s | p2p %s/%s"
                                " | bp %s/%s on %u\n",
                                ft, fr, fst, fsr, fpt, fpr, fbt, fbr,
                                (unsigned int)eee->bp->proxy_port);
@@ -3203,7 +3207,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             fmt_bytes(fpt, sizeof(fpt), eee->p2p_tx_bytes);
             fmt_bytes(fpr, sizeof(fpr), eee->p2p_rx_bytes);
             msg_len = snprintf((char*)udp_buf, N2N_PKT_BUF_SIZE,
-                               "Tx/rx: total %s/%s | super %s/%s | p2p %s/%s\n",
+                               "Tx/rx: total %s/%s | psp %s/%s | p2p %s/%s\n",
                                ft, fr, fst, fsr, fpt, fpr);
         }
     }

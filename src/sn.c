@@ -1341,8 +1341,8 @@ static int process_mgmt( n2n_sn_t * sss,
 
     /* Send header */
     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                      "  id  mac                virt_ip          wan_ip               <KB/s     GB/24h   GB/30d>  ver      os\n");
-    if (ressize < N2N_SN_PKTBUF_SIZE)
+                      "  id  mac                n2n_ip           wan_ip               <KB/s     GB/24h   GB/30d>  ver      os\n");
+	if (ressize < N2N_SN_PKTBUF_SIZE)
         ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
                            "---v2.3----------------------------------------------------------------------------------------------------\n");
 
