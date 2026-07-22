@@ -2569,12 +2569,17 @@ static void send_packet2net(n2n_edge_t * eee,
         idx=0;
         encode_PACKET( pktbuf, &idx, &cmn, &pkt );
 
-        /* Cache the header template */
+        /* Cache the header template.
+         * IMPORTANT: cached_dst_mac is shared with the destination address cache
+         * in send_PACKET(). When we change it for a different peer, we must
+         * invalidate the destination cache to avoid sending the new peer's
+         * packet to the old peer's address. */
         eee->cached_hdr_len = (uint16_t)idx;
         memcpy(eee->cached_pkt_hdr, pktbuf, idx);
         memcpy(eee->cached_dst_mac, destMac, N2N_MAC_SIZE);
         eee->cached_tx_transop = tx_transop_idx;
         eee->cached_hdr_valid = 1;
+        eee->cached_dst_valid = 0; /* dest cache key is now stale */
     }
     traceEvent( TRACE_DEBUG, "encoded PACKET header of size=%u transform %u (idx=%u)",
                 (unsigned int)idx, (unsigned int)eee->transop[tx_transop_idx].transform_id, (unsigned int)tx_transop_idx );
