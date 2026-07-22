@@ -99,15 +99,20 @@ SOCKET open_socket(uint16_t local_port, int bind_any) {
         return -1;
     }
 
-#ifndef _WIN32
     { int tos = 0x10; setsockopt(sock_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)); }
-    { 
-        int rcvbuf = 2 * 1024 * 1024;  /* 2MB */
-        if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
-            traceEvent(TRACE_DEBUG, "Failed to set SO_RCVBUF to %d: %s", rcvbuf, strerror(errno));
-        }
-    }
+    {
+        int buf_sz = 2 * 1024 * 1024;  /* 2MB */
+#ifdef _WIN32
+        /* Windows default UDP rcvbuf is only 8-64KB, causing burst packet loss
+         * when the main loop is briefly delayed (PEERS_LOCK, keepalive, etc.).
+         * Linux is already set to 2MB. Windows may silently reduce to a lower
+         * value if the requested size exceeds the system max, but 2MB is safe. */
+        setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, (const char*)&buf_sz, sizeof(buf_sz));
+        setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, (const char*)&buf_sz, sizeof(buf_sz));
+#else
+        setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buf_sz, sizeof(buf_sz));
 #endif
+    }
 
     return sock_fd;
 }
@@ -145,9 +150,9 @@ SOCKET open_socket6(uint16_t local_port, int bind_any) {
     setsockopt(sock_fd, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&sockopt, sizeof(sockopt));
 
 #ifdef _WIN32
-    /* Windows default UDP buffer is only 8KB, increase to 256KB for throughput */
+    /* Windows default UDP buffer is only 8KB, increase to match Linux (2MB) */
     {
-        int bufsize = 256 * 1024;
+        int bufsize = 2 * 1024 * 1024;
         setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, (const char*)&bufsize, sizeof(bufsize));
         setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, (const char*)&bufsize, sizeof(bufsize));
     }

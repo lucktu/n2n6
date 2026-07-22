@@ -1750,6 +1750,39 @@ static int process_udp( n2n_sn_t * sss,
 
             /* Copy the original payload unchanged */
             encode_buf( encbuf, &encx, (udp_buf + idx), (udp_size - idx ) );
+
+            /* Update sender's edge address in the edge table so the
+             * supernode can forward replies to the correct address.
+             * Without this, after a WiFi switch (NAT address change),
+             * the supernode would forward replies to the old address
+             * until the next REGISTER_SUPER (up to 30s + 3×12s retries).
+             * Only update if the family matches the existing registration. */
+            {
+                struct peer_info *sender_edge = find_peer_by_mac(sss->edges, pkt.srcMac);
+                if (sender_edge) {
+                    if (sender_sock->sa_family == AF_INET && sender_edge->sock.family == AF_INET) {
+                        struct sockaddr_in *si = (struct sockaddr_in *)sender_sock;
+                        if (sender_edge->sock.port != ntohs(si->sin_port) ||
+                            memcmp(sender_edge->sock.addr.v4, &si->sin_addr, IPV4_SIZE) != 0) {
+                            sender_edge->sock.port = ntohs(si->sin_port);
+                            memcpy(sender_edge->sock.addr.v4, &si->sin_addr, IPV4_SIZE);
+                            sender_edge->last_seen = now;
+                            traceEvent(TRACE_DEBUG, "Edge %s addr updated from PACKET",
+                                       macaddr_str(mac_buf, pkt.srcMac));
+                        }
+                    } else if (sender_sock->sa_family == AF_INET6 && sender_edge->sock6.family == AF_INET6) {
+                        struct sockaddr_in6 *si6 = (struct sockaddr_in6 *)sender_sock;
+                        if (sender_edge->sock6.port != ntohs(si6->sin6_port) ||
+                            memcmp(sender_edge->sock6.addr.v6, &si6->sin6_addr, IPV6_SIZE) != 0) {
+                            sender_edge->sock6.port = ntohs(si6->sin6_port);
+                            memcpy(sender_edge->sock6.addr.v6, &si6->sin6_addr, IPV6_SIZE);
+                            sender_edge->last_seen = now;
+                            traceEvent(TRACE_DEBUG, "Edge %s addr updated from PACKET",
+                                       macaddr_str(mac_buf, pkt.srcMac));
+                        }
+                    }
+                }
+            }
         }
         else
         {
@@ -2111,7 +2144,7 @@ static int process_udp( n2n_sn_t * sss,
         }
 
         /* Fill sn_version so edge can display supernode version */
-        strncpy(ack.sn_version, n2n_sw_version_full, sizeof(ack.sn_version));
+        strncpy(ack.sn_version, n2n_sw_version_full, sizeof(ack.sn_version) - 1);
 
         encode_REGISTER_SUPER_ACK( ackbuf, &encx, &cmn2, &ack );
 

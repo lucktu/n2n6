@@ -55,13 +55,13 @@
 #endif
 
 #define SOCKET_TIMEOUT_INTERVAL_SECS    1    /* sec */
-#define REGISTER_SUPER_INTERVAL_DFL     60   /* sec */
-#define REGISTER_SUPER_INTERVAL_MIN     30   /* sec */
+#define REGISTER_SUPER_INTERVAL_DFL     20   /* sec */
+#define REGISTER_SUPER_INTERVAL_MIN     10   /* sec */
 #define REGISTER_SUPER_INTERVAL_MAX     120  /* sec */
 #define IFACE_UPDATE_INTERVAL           (30) /* sec. How long it usually takes to get an IP lease. */
 #define TRANSOP_TICK_INTERVAL           (10) /* sec */
 #define PUNCH_TIMEOUT                   7    /* sec: give up hole-punch after this */
-#define CACHE_DST_TTL                   2    /* sec: cached P2P destination TTL */
+#define CACHE_DST_TTL                   5    /* sec: cached P2P destination TTL */
 
 /** maximum length of command line arguments */
 #define MAX_CMDLINE_BUFFER_LENGTH       4096
@@ -760,9 +760,11 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
         /* Transient errors during network transition (e.g. WiFi switch) */
          if ( error == WSAENETUNREACH ||
               error == WSAECONNRESET  ||
+              error == WSAENETRESET   ||
               error == WSAEHOSTUNREACH ) {
              const char *why = (error == WSAENETUNREACH) ? "Network is unreachable" :
                                (error == WSAECONNRESET)  ? "Connection was reset"   :
+                               (error == WSAENETRESET)   ? "Network dropped connection" :
                                                            "No route to host";
              traceEvent( TRACE_DEBUG, "sendto: %s (network change, harmless)", why );
          } else if ( error != WSAEFAULT && error != WSAEAFNOSUPPORT && error != WSAENOBUFS && error != WSAEWOULDBLOCK ) {
@@ -983,7 +985,7 @@ static int find_best_local_ip(n2n_edge_t * eee, const n2n_sock_t * peer_lan_sock
                          ((addr_ip >> 16) == (192 << 8 | 168));
             if (is_private && addr_ip != ntohl(eee->device.ip_addr)) {
                 /* Skip if same as local_sock (already checked) */
-                if (eee->local_sock_ena && memcpy(&pAddr->sin_addr.s_addr, eee->local_sock.addr.v4, IPV4_SIZE) == 0)
+                if (eee->local_sock_ena && memcmp(&pAddr->sin_addr.s_addr, eee->local_sock.addr.v4, IPV4_SIZE) == 0)
                     continue;
                 /* Check if this IP matches peer's subnet */
                 n2n_sock_t candidate;
@@ -1529,6 +1531,7 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
 #define KEEPALIVE_RETRY_INTERVAL  4   /* seconds between retries */
 #define KEEPALIVE_MAX_FAILS       3   /* fall back to relay after this many consecutive failures */
 #define KEEPALIVE_TOTAL_TIMEOUT   (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_RETRY_INTERVAL * KEEPALIVE_MAX_FAILS)  /* 32s */
+#define FAST_P2P_FAIL_SECONDS    6    /* sec: if p2p peer not heard from, force relay immediately */
 
 static void update_peer_address(n2n_edge_t * eee,
                                 uint8_t from_supernode,
@@ -1566,20 +1569,31 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
          * Since bypass only operates after P2P is established, total byte
          * throughput reliably indicates whether the connection is alive. */
         if (scan->direct_seen > 0) {
-            size_t cur_total_tx = eee->p2p_tx_bytes + eee->super_tx_bytes
-                                + (eee->bp ? eee->bp->bp_tx_bytes : 0);
-            size_t cur_total_rx = eee->p2p_rx_bytes + eee->super_rx_bytes
-                                + (eee->bp ? eee->bp->bp_rx_bytes : 0);
-            if (cur_total_tx > eee->last_check_total_tx ||
-                cur_total_rx > eee->last_check_total_rx) {
-                eee->last_check_total_tx = cur_total_tx;
-                eee->last_check_total_rx = cur_total_rx;
-                scan->last_seen = now; /* prevent timeout */
+            /* Data flow guard: only RX from P2P (p2p_rx_bytes) counts as
+             * the peer being alive. Relay traffic (super_rx_bytes) does
+             * NOT count — we could be getting relayed packets while P2P
+             * is dead (e.g. WiFi switch), and we don't want to suppress
+             * keepalive probes. */
+            size_t cur_p2p_rx = eee->p2p_rx_bytes;
+            if (cur_p2p_rx > eee->last_p2p_rx) {
+                eee->last_p2p_rx = cur_p2p_rx;
+                scan->last_seen = now;
                 scan = next;
                 continue;
             }
         } else {
-            /* P2P not yet established, no keepalive needed */
+            /* Relay peer: detect broken relay path.
+             * Since PEER_INFO no longer updates last_seen, this correctly
+             * reflects the time since we last received a packet FROM the peer.
+             * If idle > 60s and we haven't recently re-registered (30s rate
+             * limit), force supernode re-registration + query peer to
+             * re-discover the peer's status. */
+            if (idle > 60 && (now - eee->last_register_req) > 30) {
+                traceEvent(TRACE_NORMAL, "Relay check: peer %s unreachable for %lds, querying supernode",
+                           PEER_ID(mac_tmp, scan), (long)idle);
+                eee->last_register_req = 0;
+                send_query_peer(eee, scan->mac_addr);
+            }
             scan = next;
             continue;
         }
@@ -1663,8 +1677,19 @@ static void check_keepalive( n2n_edge_t * eee, time_t now )
                     scan->last_probe_sent    = 0;
                     scan->p2p_logged         = 0;
                     scan->psp_logged         = 0;
+                    /* Invalidate destination cache so TAP thread doesn't send
+                     * to the dead P2P address. Must match this peer's MAC. */
+                    if (eee->cached_dst_valid &&
+                        memcmp(eee->cached_dst_mac, scan->mac_addr, N2N_MAC_SIZE) == 0)
+                        eee->cached_dst_valid = 0;
                     send_query_peer(eee, scan->mac_addr);
                     start_punch(eee, scan);
+                    /* Force immediate supernode re-registration so the
+                     * supernode gets our current NAT address. Without this,
+                     * relayed replies from the peer would be forwarded to
+                     * our old address until the next periodic re-registration
+                     * (up to 30s + 3×12s retries). */
+                    eee->last_register_req = 0;
                     /* Keep scan in known_peers — relay works immediately */
                     scan = next;
                     continue;
@@ -1962,9 +1987,9 @@ void set_peer_operational( n2n_edge_t * eee,
         traceEvent( TRACE_INFO, "Operational peers list size=%u",
                     (unsigned int)peer_list_size( eee->known_peers ) );
 
-        /* Start bypass negotiation for this peer if applicable */
-        if (eee->bp)
-            bypass_start_negotiation(eee->bp, scan);
+        /* Start bypass negotiation for this peer if applicable.
+         * Delayed by 2 seconds after P2P establishment (principle 10):
+         * the actual check happens in the main loop via check_delayed_bypass(). */
 
     } else {
         /* Peer not in pending_peers - check if already in known_peers (late REGISTER_ACK) */
@@ -2156,12 +2181,31 @@ static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
 
     if ( 0 == eee->sup_attempts )
     {
-        ++(eee->sn_idx);
-    if (eee->sn_idx >= eee->sn_num) eee->sn_idx=0;
-        traceEvent(TRACE_WARNING, "Supernode not responding - moving to %u of %u",
-                   (unsigned int)eee->sn_idx, (unsigned int)eee->sn_num);
+        if ( eee->sn_num > 1 )
+        {
+            ++(eee->sn_idx);
+            if (eee->sn_idx >= eee->sn_num) eee->sn_idx=0;
+            traceEvent(TRACE_WARNING, "Supernode not responding - moving to %u of %u",
+                       (unsigned int)eee->sn_idx, (unsigned int)eee->sn_num);
+        } else {
+            /* Single supernode: no point "switching", just retry */
+            traceEvent(TRACE_DEBUG, "Supernode not responding - retrying same supernode");
+        }
         eee->sup_attempts = N2N_EDGE_SUP_ATTEMPTS;
-        
+
+        /* Close and re-open UDP sockets so NAT mapping is refreshed.
+         * This helps when the local address changed (e.g. WiFi switch)
+         * but the socket is still bound to the old IP. Only do this
+         * for non-privileged ports or zero (any port). */
+        if ( eee->local_port == 0 || eee->local_port > 1024 )
+        {
+            if (eee->udp_sock != -1) closesocket(eee->udp_sock);
+            if (eee->udp_sock6 != -1) closesocket(eee->udp_sock6);
+            eee->udp_sock  = open_socket(eee->local_port, 1);
+            eee->udp_sock6 = open_socket6(eee->local_port, 1);
+            traceEvent(TRACE_NORMAL, "UDP sockets re-opened for fresh NAT mapping");
+        }
+
         /* Re-resolve supernode address when switching to a different supernode */
         if(eee->re_resolve_supernode_ip)
         {
@@ -2225,6 +2269,19 @@ static int find_peer_destination(n2n_edge_t * eee,
             /* If keepalive probe is pending and total timeout exceeded, fall back to relay */
             if (scan->last_probe_sent > 0 && (now - scan->last_seen) > KEEPALIVE_TOTAL_TIMEOUT) {
                 traceEvent(TRACE_DEBUG, "find_peer_destination: keepalive failed, using relay");
+                break;
+            }
+
+            /* Fast fail: if peer established P2P but hasn't been directly heard from for
+             * FAST_P2P_FAIL_SECONDS, the P2P path is likely dead (e.g. WiFi switch
+             * on peer side). Fall back to relay immediately instead of continuing
+             * to send packets into a dead path. This uses direct_seen (only updated
+             * by P2P packets) rather than last_seen (also updated by relay packets)
+             * to avoid P2P↔relay oscillation. */
+            if ((now - scan->direct_seen) > FAST_P2P_FAIL_SECONDS) {
+                traceEvent(TRACE_INFO, "find_peer_destination: %s P2P silent %lus, fast fail to relay",
+                           PEER_ID(mac_buf, scan),
+                           (unsigned long)(now - scan->direct_seen));
                 break;
             }
 
@@ -2294,7 +2351,13 @@ static int send_PACKET( n2n_edge_t * eee,
      * Cache only for P2P direct (never relay). TTL ensures we periodically
      * re-evaluate via find_peer_destination, keeping NAT changes detected.
      *
-     * WS mode: completely disable P2P, force relay via supernode. */
+     * WS mode: completely disable P2P, force relay via supernode.
+     *
+     * Windows: TAP thread must never block on PEERS_LOCK (causes packet loss).
+     * Use TryEnterCriticalSection: if lock is held by main loop, use stale
+     * cache instead of blocking. Stale cache is safe — worst case we send
+     * a few packets to an old P2P address (they'll be lost, same as if
+     * P2P just died). Main loop will update peer state and cache eventually. */
     if (eee->use_ws) {
         dest = 0;
         destination = eee->supernode;
@@ -2303,20 +2366,49 @@ static int send_PACKET( n2n_edge_t * eee,
         memcmp(eee->cached_dst_mac, dstMac, N2N_MAC_SIZE) == 0 &&
         (now - eee->cached_dst_time) < CACHE_DST_TTL)
     {
+        /* Cache is fresh — use without lock */
         dest = 1;
         destination = eee->cached_dst_sock;
         ++(eee->tx_p2p); eee->p2p_tx_bytes += pktlen;
     } else {
+#ifdef _WIN32
+        /* Windows: TAP thread must not block. Try lock, use stale cache if contended. */
+        int got_lock = TryEnterCriticalSection(&eee->peers_lock);
+        if (got_lock) {
+            dest = find_peer_destination(eee, dstMac, &destination);
+            if (dest) { ++(eee->tx_p2p); eee->p2p_tx_bytes += pktlen; }
+            else { ++(eee->tx_sup); eee->super_tx_bytes += pktlen; destination = eee->supernode; }
+            LeaveCriticalSection(&eee->peers_lock);
+            if (dest) {
+                memcpy(eee->cached_dst_mac, dstMac, N2N_MAC_SIZE);
+                eee->cached_dst_sock = destination;
+                eee->cached_dst_time = now;
+                eee->cached_dst_is_peer = 1;
+                eee->cached_dst_valid = 1;
+            }
+        } else if (eee->cached_dst_valid && eee->cached_dst_is_peer &&
+                   memcmp(eee->cached_dst_mac, dstMac, N2N_MAC_SIZE) == 0)
+        {
+            /* Lock contended — use stale cache (better than blocking or dropping) */
+            dest = 1;
+            destination = eee->cached_dst_sock;
+            ++(eee->tx_p2p); eee->p2p_tx_bytes += pktlen;
+        } else {
+            /* No cache and lock contended — relay via supernode (never block TAP thread) */
+            dest = 0;
+            destination = eee->supernode;
+            ++(eee->tx_sup); eee->super_tx_bytes += pktlen;
+        }
+#else
+        /* Linux: single-threaded TAP, no contention */
         PEERS_LOCK(eee);
         dest = find_peer_destination(eee, dstMac, &destination);
         if (dest) { ++(eee->tx_p2p); eee->p2p_tx_bytes += pktlen; }
         else {
             ++(eee->tx_sup); eee->super_tx_bytes += pktlen;
-            /* Relay via supernode: fallback destination when no P2P path exists */
             destination = eee->supernode;
         }
         PEERS_UNLOCK(eee);
-        /* Cache only P2P direct destinations, never relay addresses */
         if (dest) {
             memcpy(eee->cached_dst_mac, dstMac, N2N_MAC_SIZE);
             eee->cached_dst_sock = destination;
@@ -2324,6 +2416,7 @@ static int send_PACKET( n2n_edge_t * eee,
             eee->cached_dst_is_peer = 1;
             eee->cached_dst_valid = 1;
         }
+#endif
     }
 
     traceEvent( TRACE_DEBUG, "send_PACKET to %s", sock_to_cstr( sockbuf, &destination ) );
@@ -2690,7 +2783,11 @@ static int handle_PACKET( n2n_edge_t * eee,
         if ((peer_uses_ipv4 && packet_is_ipv4) || (peer_uses_ipv6 && !packet_is_ipv4)) {
             n2n_sock_t *expected_sock = peer_uses_ipv4 ? &scan->sock : &scan->sock6;
             if (0 != sock_equal(expected_sock, orig_sender)) {
+                /* Principle 13: peer's address changed during P2P communication.
+                 * Update address and send REGISTER to confirm our reverse path. */
                 update_peer_address(eee, from_supernode, pkt->srcMac, orig_sender, now);
+                send_register(eee, orig_sender);
+                send_register(eee, &(eee->supernode));
             } else {
                 scan->last_seen = now;
             }
@@ -2699,12 +2796,34 @@ static int handle_PACKET( n2n_edge_t * eee,
             scan->last_seen = now;
         }
     } else {
-        /* Relayed packet from known peer: update last_seen and continue.
-         * Do NOT compare orig_sender with peer's P2P address -- orig_sender
-         * is the supernode's address for relayed packets, not the peer's,
-         * so the comparison would always be a mismatch and falsely trigger
-         * a move to pending_peers, destroying the P2P path. */
-        scan->last_seen = now;
+        /* Relayed packet from known peer.
+         * If P2P was established (direct_seen > 0), check if the peer's
+         * embedded address (pkt->sock, added by supernode) has changed.
+         * If so, the peer's address changed — trigger re-punch.
+         * Only update last_seen if P2P is not established (already relaying). */
+        if (scan->direct_seen > 0 && !is_empty_ip_address(&pkt->sock)) {
+            n2n_sock_t *active_sock = (scan->sock.family == AF_INET) ? &scan->sock : &scan->sock6;
+            if (sock_equal(active_sock, &pkt->sock) != 0) {
+                /* Peer address changed (observed via relayed PACKET).
+                 * Principle 13: update and trigger re-punch. */
+                {
+                    macstr_t mb;
+                    traceEvent(TRACE_INFO, "Peer %s addr changed (relay detected), re-punching",
+                               macaddr_str(mb, pkt->srcMac));
+                }
+                *active_sock = pkt->sock;
+                scan->direct_seen = 0;
+                scan->punch_start_time = 0;
+                scan->punch_failed = 0;
+                send_register(eee, active_sock);
+                send_register(eee, &(eee->supernode));
+                start_punch(eee, scan);
+            } else {
+                /* Address unchanged but getting relayed — keepalive will handle it. */
+            }
+        } else if (scan->direct_seen == 0) {
+            scan->last_seen = now;
+        }
     }
     PEERS_UNLOCK(eee);
 
@@ -3605,7 +3724,10 @@ process_n2n_packet:
             if (!do_punch) {
                 if (known) {
                     int addr_changed = 0;
-                    if (known->direct_seen == 0 || (now - known->direct_seen) >= 15) {
+                    /* Principle 8+13: detect address change whenever P2P
+                     * is idle (relay) or has been idle for >= 5 seconds.
+                     * Reduced from 15s to 5s for faster re-punch response. */
+                    if (known->direct_seen == 0 || (now - known->direct_seen) >= 5) {
                         if (pi.sockets[0].family == AF_INET) {
                             if (known->sock.family != AF_INET ||
                                 sock_equal(&known->sock, &pi.sockets[0]) != 0) {
@@ -3630,7 +3752,14 @@ process_n2n_packet:
                             known->sock6 = pi.sock6;
                         if (pi.version[0]) strncpy(known->version, pi.version, sizeof(known->version) - 1);
                         if (pi.os_name[0]) strncpy(known->os_name, pi.os_name, sizeof(known->os_name) - 1);
-                        known->last_seen = n2n_now();
+                        /* Do NOT update last_seen here — PEER_INFO is from the
+                         * supernode, not from the peer itself. Updating last_seen
+                         * would mask relay failures: if the relay is broken but
+                         * the supernode still sends PEER_INFO (because the peer
+                         * is still registered), last_seen stays current and the
+                         * relay failure detection in check_keepalive never triggers.
+                         * last_seen should only reflect actual peer communication
+                         * (PACKET, REGISTER), not metadata from the supernode. */
                         PEERS_UNLOCK(eee);
                         return;
                     }
@@ -3867,8 +3996,16 @@ process_n2n_packet:
                             initial_connection_complete = 1;
                         }
 
-                        /* Store our own public address as seen by supernode */
+                        /* Store our own public address as seen by supernode.
+                         * Log if it changed (e.g. WiFi switch). */
+                        n2n_sock_t old_pub = eee->my_public_sock;
                         eee->my_public_sock = ra.sock;
+                        if (old_pub.family != 0 &&
+                            sock_equal(&old_pub, &eee->my_public_sock) != 0)
+                        {
+                            traceEvent(TRACE_NORMAL, "Our public address changed to %s",
+                                       sock_to_cstr(sockbuf1, &eee->my_public_sock));
+                        }
 
                         /* TODO: store sn_bak for backup supernode failover */
                         eee->register_lifetime = ra.lifetime;
@@ -4724,6 +4861,23 @@ fail:
     return 0;
 }
 
+/** In the main loop: start bypass negotiation for known_peers that have
+ *  had P2P established for >= 2 seconds (principle 10: "旁路只是备选项").
+ *  The 2s guard is enforced by bypass_start_negotiation(). */
+static void check_delayed_bypass(n2n_edge_t *eee, time_t now)
+{
+    if (!eee->bp) return;
+    struct peer_info *scan = eee->known_peers;
+    while (scan) {
+        if (scan->direct_seen > 0 && (now - scan->direct_seen) >= 2 &&
+            scan->assigned_ip != 0)
+        {
+            bypass_start_negotiation(eee->bp, scan);
+        }
+        scan = scan->next;
+    }
+}
+
 static int run_loop(n2n_edge_t * eee );
 
 #define N2N_NETMASK_STR_SIZE    16 /* dotted decimal 12 numbers + 3 dots */
@@ -4922,7 +5076,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
             break;
         case 'c': /* community as a string */
             memset( eee.community_name, 0, N2N_COMMUNITY_SIZE );
-            strncpy( (char *)eee.community_name, optarg, N2N_COMMUNITY_SIZE);
+            strncpy( (char *)eee.community_name, optarg, N2N_COMMUNITY_SIZE - 1);
             memcpy(eee.community_name_full, eee.community_name, N2N_COMMUNITY_SIZE);
             break;
         case 'E': /* multicast ethernet addresses accepted. */
@@ -4953,8 +5107,9 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
 
         case 'k': /* encrypt key */
             has_k_flag = 1;
-            traceEvent(TRACE_DEBUG, "encrypt_key = '%s'", encrypt_key);
+            if (encrypt_key) free(encrypt_key);
             encrypt_key = strdup(optarg);
+            traceEvent(TRACE_DEBUG, "encrypt_key = '%s'", encrypt_key);
             break;
         case 'r': /* enable packet routing across n2n endpoints */
             eee.allow_routing = 1;
@@ -4984,6 +5139,7 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
 #endif
         case 'p':
             local_port = atoi(optarg);
+            eee.local_port = (uint16_t)local_port;
             break;
 
         case 't':
@@ -5425,19 +5581,25 @@ static int run_loop(n2n_edge_t * eee )
         /* Handle signal interruption */
         if (rc < 0) {
 #ifdef _WIN32
-            if (WSAGetLastError() == WSAEINTR) {
+            int _sel_err = WSAGetLastError();
+            if (_sel_err == WSAEINTR) {
                 continue;
+            }
+            traceEvent(TRACE_ERROR, "select() failed: [%d]", _sel_err);
+            if (_sel_err == WSAENOTSOCK || _sel_err == WSAENOBUFS) {
+                retval = -1;
+                goto cleanup;
             }
 #else
             if (errno == EINTR) {
                 continue;
             }
-#endif
             traceEvent(TRACE_ERROR, "select() failed: %s", strerror(errno));
             if (errno == EBADF || errno == ENOMEM) {
                 retval = -1;
                 goto cleanup;
             }
+#endif
             continue;
         }
 
@@ -5542,6 +5704,10 @@ static int run_loop(n2n_edge_t * eee )
         /* Periodically check if supernode domain resolved to a new address */
         check_supernode_domain_and_update(eee, nowTime);
 
+        /* Delayed bypass start: ensure P2P has been established >= 2s
+         * before starting negotiation (principle 10). */
+        check_delayed_bypass(eee, nowTime);
+
         /* Bypass tick: handle timeouts and state transitions */
         if (bypass_has_peers(eee->bp)) {
             bypass_tick(eee->bp, nowTime);
@@ -5630,7 +5796,17 @@ static int run_loop(n2n_edge_t * eee )
             }
         }
         numPurged =  purge_expired_registrations( &(eee->known_peers) );
-        numPurged += purge_expired_registrations( &(eee->pending_peers) );
+        /* pending_peers: use much longer timeout. These are relay-only peers
+         * that we know exist but can't punch to. Forgetting them causes long
+         * re-discovery delays when traffic resumes after idle (the "stop ping,
+         * resume ping = unreachable" problem). The 1800s stuck-peer check in
+         * check_punch_timeouts handles truly dead peers. */
+        numPurged += purge_peer_list( &(eee->pending_peers), nowTime - 1800 );
+        /* Invalidate destination cache if any peer was purged — the cached
+         * peer may have been removed. Safe to set outside lock on Windows
+         * because TAP thread only reads this flag (0 = don't use cache). */
+        if (numPurged > 0)
+            eee->cached_dst_valid = 0;
         /* After purging, clean up bypass state for removed peers */
         if (bypass_has_peers(eee->bp) && bp_known_count > 0) {
             for (int _bki = 0; _bki < bp_known_count; _bki++) {

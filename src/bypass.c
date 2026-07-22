@@ -771,6 +771,10 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
             if (c->state == BYPASS_CONN_CONNECTING) {
                 c->state = BYPASS_CONN_ESTABLISHED;
                 c->last_active = n2n_now();
+                /* Update peer_addr to the address SYN-ACK came from.
+                 * After NAT rebinding, the responder's address may differ
+                 * from the one we sent SYN to. */
+                c->peer_addr = *sender;
                 /* KCP was initialized at SYN time; peer entry's is_lan
                  * determined LAN/WAN reliably at negotiation time. */
                 c->user_data = (void *)ctx;
@@ -900,6 +904,12 @@ void bypass_handle_recv(bypass_context_t *ctx, const uint8_t *buf,
             return;
 
         struct bypass_conn *c = &ctx->conns[idx];
+
+        /* Update peer address if it changed (NAT rebinding).
+         * Without this, bypass_kcp_output keeps sending to the old
+         * address after a NAT change, causing data loss until timeout. */
+        if (sock_equal(&c->peer_addr, sender) != 0)
+            c->peer_addr = *sender;
 
         ssize_t dec_len = bypass_decode(ctx, c->kcp_buf, BYPASS_PKT_BUF_SIZE,
                                          enc_payload, enc_len, algo_idx);
@@ -1191,6 +1201,11 @@ void bypass_start_negotiation(bypass_context_t *ctx, struct peer_info *peer)
         return;
 
     if (peer->assigned_ip == 0)
+        return;
+
+    /* Principle 10: wait at least 2 seconds after P2P establishment
+     * before starting bypass negotiation ("旁路只是备选项"). */
+    if (n2n_now() - peer->direct_seen < 2)
         return;
 
     bypass_peer_entry_t *pe = bypass_find_peer(ctx, peer->assigned_ip);

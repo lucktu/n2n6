@@ -654,14 +654,28 @@ ssize_t ws_recv(ws_conn_t *c, void *out, size_t outlen) {
             if (plen == 126) {
                 if (c->rx_len < 4) goto needmore;
                 payload_len = ((size_t)c->rx_buf[2] << 8) | c->rx_buf[3];
+                if (payload_len > N2N_PKT_BUF_SIZE) {
+                    ws_close(c);
+                    return -1;
+                }
                 extlen = 2;
             } else if (plen == 127) {
                 if (c->rx_len < 10) goto needmore;
-                /* n2n packet < 4GB, take lower 32 bits */
+                /* Validate: upper 32 bits must be zero (n2n packets fit in 32-bit);
+                 * non-zero indicates a malicious/malformed frame. */
+                if (c->rx_buf[2] || c->rx_buf[3] || c->rx_buf[4] || c->rx_buf[5]) {
+                    ws_close(c);
+                    return -1;
+                }
                 payload_len = ((size_t)c->rx_buf[6] << 24) |
                               ((size_t)c->rx_buf[7] << 16) |
                               ((size_t)c->rx_buf[8] << 8) |
                               ((size_t)c->rx_buf[9]);
+                /* Reject oversized payloads (n2n packets are <= N2N_PKT_BUF_SIZE) */
+                if (payload_len > N2N_PKT_BUF_SIZE) {
+                    ws_close(c);
+                    return -1;
+                }
                 extlen = 8;
             } else {
                 payload_len = plen;
@@ -694,7 +708,19 @@ ssize_t ws_recv(ws_conn_t *c, void *out, size_t outlen) {
                 ws_consume(c, need);
                 continue;
             } else {
-                /* binary(0x2) / continuation(0x0) / text(0x1): treat as data */
+                /* binary(0x2) / text(0x1): treat as data.
+                 * Continuation(0x0): protocol error (n2n never fragments).
+                 * FIN must be set (n2n never sends fragmented messages). */
+                if (opcode == 0x0) {
+                    /* Unexpected continuation frame without preceding fragment */
+                    ws_close(c);
+                    return -1;
+                }
+                if (!(b0 & 0x80)) {
+                    /* Fragmented frame: n2n never fragments, treat as protocol error */
+                    ws_close(c);
+                    return -1;
+                }
                 size_t copy = (payload_len < outlen) ? payload_len : outlen;
                 memcpy(out, payload, copy);
                 ws_consume(c, need);

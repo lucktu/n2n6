@@ -386,6 +386,8 @@ struct n2n_edge
     SOCKET              udp_sock6;
     SOCKET              mgmt_sock;
 
+    uint16_t            local_port; /* user-specified UDP port, 0 = any */
+
     /* WebSocket client (edge side, -w flag): relay via WS when UDP is blocked, disable P2P */
     int                 use_ws;
     ws_conn_t           ws_conn;
@@ -441,9 +443,9 @@ struct n2n_edge
     size_t              p2p_tx_bytes;
     size_t              p2p_rx_bytes;
 
-    /* Keepalive data-flow detection: snapshot of total TX/RX at last check */
-    size_t              last_check_total_tx;
-    size_t              last_check_total_rx;
+    /* Keepalive data-flow detection: snapshot of p2p_rx_bytes at last check.
+     * Only P2P traffic counts — relay traffic does not suppress probes. */
+    size_t              last_p2p_rx;
 
 #ifdef _WIN32
     volatile int        keep_running;
