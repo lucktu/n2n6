@@ -1532,6 +1532,7 @@ static void check_punch_timeouts( n2n_edge_t * eee, time_t now )
 #define KEEPALIVE_MAX_FAILS       3   /* fall back to relay after this many consecutive failures */
 #define KEEPALIVE_TOTAL_TIMEOUT   (KEEPALIVE_IDLE_SECONDS + KEEPALIVE_RETRY_INTERVAL * KEEPALIVE_MAX_FAILS)  /* 32s */
 #define FAST_P2P_FAIL_SECONDS    6    /* sec: if p2p peer not heard from, force relay immediately */
+#define P2P_EST_GRACE           1    /* sec: after P2P established, keep relay for this long */
 
 static void update_peer_address(n2n_edge_t * eee,
                                 uint8_t from_supernode,
@@ -1943,6 +1944,7 @@ void set_peer_operational( n2n_edge_t * eee,
         }
         scan->last_seen = n2n_now();
         scan->direct_seen = n2n_now();
+        scan->p2p_est_time = scan->direct_seen;
         scan->punch_start_time = 0;
         scan->punch_failed = 0;
         scan->register_retry_count = 0;
@@ -1990,6 +1992,8 @@ void set_peer_operational( n2n_edge_t * eee,
         /* Start bypass negotiation for this peer if applicable.
          * Delayed by 2 seconds after P2P establishment (principle 10):
          * the actual check happens in the main loop via check_delayed_bypass(). */
+
+        eee->cached_dst_valid = 0;
 
     } else {
         /* Peer not in pending_peers - check if already in known_peers (late REGISTER_ACK) */
@@ -2263,6 +2267,16 @@ static int find_peer_destination(n2n_edge_t * eee,
             /* If never had direct P2P communication, use relay */
             if (scan->direct_seen == 0) {
                 traceEvent(TRACE_DEBUG, "find_peer_destination: no direct_seen yet, using relay");
+                break;
+            }
+
+            /* P2P establishment grace period: for the first P2P_EST_GRACE seconds
+             * after set_peer_operational, continue using relay. The first few P2P
+             * packets may be lost before the direct path stabilizes (NAT mapping);
+             * this gives the P2P path time to settle before we rely on it. */
+            if ((now - scan->p2p_est_time) < P2P_EST_GRACE) {
+                traceEvent(TRACE_DEBUG, "find_peer_destination: P2P established %lus ago, grace, relay",
+                           (unsigned long)(now - scan->p2p_est_time));
                 break;
             }
 
@@ -2802,33 +2816,26 @@ static int handle_PACKET( n2n_edge_t * eee,
         }
     } else {
         /* Relayed packet from known peer.
-         * If P2P was established (direct_seen > 0), check if the peer's
-         * embedded address (pkt->sock, added by supernode) has changed.
-         * If so, the peer's address changed — trigger re-punch.
-         * Only update last_seen if P2P is not established (already relaying). */
-        if (scan->direct_seen > 0 && !is_empty_ip_address(&pkt->sock)) {
+         * If P2P has never been established (direct_seen == 0), the
+         * peer's address in pkt->sock (from supernode) may be more
+         * current — overwrite and trigger re-punch (Principle 13).
+         *
+         * If P2P has been established (direct_seen > 0), the stored
+         * address is already correct. A relay packet is not evidence
+         * of address change — overwriting would destroy the correct
+         * address and cause unnecessary breakage (especially for LAN
+         * peers where pkt->sock is the public address, not LAN addr).
+         * Keepalive handles true P2P failure detection and recovery. */
+        if (scan->direct_seen == 0 && !is_empty_ip_address(&pkt->sock)) {
             n2n_sock_t *active_sock = (scan->sock.family == AF_INET) ? &scan->sock : &scan->sock6;
             if (sock_equal(active_sock, &pkt->sock) != 0) {
-                /* Peer address changed (observed via relayed PACKET).
-                 * Principle 13: update and trigger re-punch. */
-                {
-                    macstr_t mb;
-                    traceEvent(TRACE_INFO, "Peer %s addr changed (relay detected), re-punching",
-                               macaddr_str(mb, pkt->srcMac));
-                }
+                macstr_t mb;
+                traceEvent(TRACE_INFO, "Peer %s addr from SN, updating",
+                           macaddr_str(mb, pkt->srcMac));
                 *active_sock = pkt->sock;
-                scan->direct_seen = 0;
-                scan->punch_start_time = 0;
-                scan->punch_failed = 0;
-                send_register(eee, active_sock);
-                send_register(eee, &(eee->supernode));
-                start_punch(eee, scan);
-            } else {
-                /* Address unchanged but getting relayed — keepalive will handle it. */
             }
-        } else if (scan->direct_seen == 0) {
-            scan->last_seen = now;
         }
+        scan->last_seen = now;
     }
     PEERS_UNLOCK(eee);
 
