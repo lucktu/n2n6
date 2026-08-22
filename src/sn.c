@@ -1621,7 +1621,7 @@ static int process_mgmt( n2n_sn_t * sss,
             const char *tarrow = (total_kbps >= 0.1) ? "--->" : "    ";
             ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                                "----------------\n"
-                               "Total traffic                                              %s %-7.1f  %-7.1f  %-10.1f\n",
+                               "Total_traffic                                              %s %-7.1f  %-7.1f  %-10.1f\n",
                                tarrow, total_kbps, total_24h, total_30d);
             sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
         }
@@ -1634,12 +1634,16 @@ static int process_mgmt( n2n_sn_t * sss,
     time_t uptime = now - sss->start_time;
     int days = uptime / 86400;
     int hours = (uptime % 86400) / 3600;
+    char time_buf[32];
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", localtime(&now));
+
+    int mins = (uptime % 3600) / 60;
 
     ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
-                       "uptime %dd_%dh | edges %u | cmnts %u | reg_nak %u | errs %u | last_reg %lus ago | last_fwd %lus ago\n",
-                       days, hours,
-                       num_edges,
+                       "%s up %dd_%dh_%dm | cmnts %u | edges %u | reg_nak %u | errs %u | last_reg/fwd %lus/%lus ago\n",
+                       time_buf, days, hours, mins,
                        num_communities,
+                       num_edges,
                        (unsigned int)sss->stats.reg_super_nak,
                        (unsigned int)sss->stats.errors,
                        (long unsigned int)(now - sss->stats.last_reg_super),
@@ -1656,9 +1660,6 @@ static int process_mgmt( n2n_sn_t * sss,
         ip_support = "None";
     }
 
-    char time_buf[32];
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", localtime(&now));
-
     if (ressize < N2N_SN_PKTBUF_SIZE)
         ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
                            "broadcast %u | reg_sup %u | fwd %u | ip_support: %s | %s\n",
@@ -1666,7 +1667,7 @@ static int process_mgmt( n2n_sn_t * sss,
                            (unsigned int)sss->stats.reg_super,
                            (unsigned int) sss->stats.fwd,
                            ip_support,
-                           time_buf);
+                           n2n_sw_version_full);
 
     r = sendto(sss->mgmt_sock, resbuf, ressize, 0,
               sender_sock, sender_sock_len);
