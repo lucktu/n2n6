@@ -784,6 +784,22 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
 
     sent = sendto( fd, buf, len, 0/*flags*/,
                    (struct sockaddr*) &peer_addr, addr_len );
+
+    for( int retry = 0; retry < 50 && sent < 0; retry++ )
+    {
+#ifdef _WIN32
+        if( WSAGetLastError() != WSAEWOULDBLOCK )
+            break;
+        Sleep(1);
+#else
+        if( errno != EAGAIN && errno != EWOULDBLOCK )
+            break;
+        usleep(1000);
+#endif
+        sent = sendto( fd, buf, len, 0/*flags*/,
+                       (struct sockaddr*) &peer_addr, addr_len );
+    }
+
     if ( sent < 0 )
     {
 #ifdef _WIN32

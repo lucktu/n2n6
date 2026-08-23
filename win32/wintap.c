@@ -40,6 +40,22 @@ static int get_adapter_luid(PWSTR device_name, NET_LUID* luid) {
     return 0;
 }
 
+static uint32_t set_mtu(struct tuntap_dev* device) {
+    MIB_IPINTERFACE_ROW row;
+
+    InitializeIpInterfaceEntry(&row);
+    row.InterfaceLuid = device->luid;
+    row.Family = AF_INET;
+
+    if (GetIpInterfaceEntry(&row) != NO_ERROR)
+        return (uint32_t)-1;
+
+    row.NlMtu = device->mtu;
+    row.SitePrefixLength = 0;
+
+    return SetIpInterfaceEntry(&row);
+}
+
 static uint32_t set_dhcp(struct tuntap_dev* device) {
     wchar_t if_name[MAX_ADAPTER_NAME_LENGTH];
     /* lets hope that these are big enough */
@@ -294,8 +310,10 @@ int tuntap_open(struct tuntap_dev *device, struct tuntap_config* config) {
 
         tuntap_get_address(device);
 
-        if(device->mtu != DEFAULT_MTU)
-            traceEvent(TRACE_WARNING, "MTU set is not supported on Windows");
+        if (set_mtu(device) == NO_ERROR)
+            traceEvent(TRACE_NORMAL, "Interface MTU set to %d", device->mtu);
+        else
+            traceEvent(TRACE_WARNING, "Unable to set interface MTU to %d", device->mtu);
 
         /* set driver media status to 'connected' */
         if (!DeviceIoControl(
@@ -555,8 +573,10 @@ int tuntap_restart( tuntap_dev* device ) {
 
     tuntap_get_address(device);
 
-    if(device->mtu != DEFAULT_MTU)
-        traceEvent(TRACE_WARNING, "MTU set is not supported on Windows");
+    if (set_mtu(device) == NO_ERROR)
+        traceEvent(TRACE_NORMAL, "Interface MTU set to %d", device->mtu);
+    else
+        traceEvent(TRACE_WARNING, "Unable to set interface MTU to %d", device->mtu);
 
     if (!DeviceIoControl(
         device->device_handle, TAP_WIN_IOCTL_SET_MEDIA_STATUS,
