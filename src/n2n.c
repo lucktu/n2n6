@@ -99,7 +99,11 @@ SOCKET open_socket(uint16_t local_port, int bind_any) {
         return -1;
     }
 
-    { int tos = 0x10; setsockopt(sock_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)); }
+    /* Leave IP_TOS at the OS default (0 = Best Effort). The original n2n set
+     * 0x10 (DSCP CS1), which some carrier QoS policies classify as low-priority
+     * and rate-limit, capping tunnel throughput well below line rate (~53 Mbps
+     * vs ~82 Mbps for the same link). A null DSCP avoids that classification. */
+    { int tos = 0; setsockopt(sock_fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)); }
     {
         int buf_sz = 2 * 1024 * 1024;  /* 2MB */
 #ifdef _WIN32
