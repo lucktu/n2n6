@@ -264,6 +264,23 @@ struct peer_info {
 struct n2n_edge; /* forward declaration, defined below */
 typedef struct n2n_edge         n2n_edge_t;
 
+/* Main loop tick cadence — shared by all platforms.
+ *   10 ms was chosen because it simultaneously satisfies three generic
+ *   constraints that every n2n edge deployment has to handle:
+ *     (1) KCP ikcp_update() runs naturally at 100 Hz,
+ *     (2) ingress fds (UDP v4/v6, mgmt sock, WS, bypass proxy/conns) are
+ *         polled via select(timeout=0) after every wakeup, so worst-case
+ *         0-10 ms extra ingress latency — completely invisible to
+ *         interactive ping (RTT >> 10 ms on any real WAN link),
+ *     (3) Windows side avoids WSAEventSelect entirely — that WinSock
+ *         function silently flips UDP sockets to non-blocking mode,
+ *         which would destroy the SO_SNDBUF-based implicit back-pressure
+ *         the single-threaded send_packet2net path relies on to auto-tune
+ *         TCP cwnd to the actual uplink bandwidth with zero parameters.
+ *   Same value at every bandwidth, peer count, and operating system —
+ *   fully generic, no scenario-specific tuning required. */
+#define N2N_MAINLOOP_TICK_MS    10
+
 
 /* ************************************** */
 
@@ -311,6 +328,21 @@ extern ssize_t tuntap_read(struct tuntap_dev *tuntap, unsigned char *buf, size_t
 extern ssize_t tuntap_write(struct tuntap_dev *tuntap, unsigned char *buf, size_t len);
 extern void tuntap_close(struct tuntap_dev *tuntap);
 extern void tuntap_get_address(struct tuntap_dev *tuntap);
+#ifdef _WIN32
+/* Windows single-threaded TAP reader — overlapped I/O driven from the
+ *   main loop (architecture 100% aligned with cnn2n).  Replace the
+ *   blocking tunReadThread + tuntap_read pair.
+ *     tuntap_read_begin_overlapped : submit async ReadFile using
+ *         tuntap_dev.overlap_read + internal read_buf[2000].  Returns
+ *         >0 (sync-complete, bytes in read_buf, no IRP pending),
+ *         =0 (async queued, wait on overlap_read.hEvent then call
+ *            complete), <0 error.
+ *     tuntap_read_complete_overlapped : collect result after event
+ *         signal.  Returns byte count (>0) or error (<0).  Always
+ *         clears read_pending so a new read can be submitted. */
+extern ssize_t tuntap_read_begin_overlapped(struct tuntap_dev *tuntap);
+extern ssize_t tuntap_read_complete_overlapped(struct tuntap_dev *tuntap);
+#endif
 extern int set_ipaddress(const tuntap_dev* device, int static_address);
 
 extern SOCKET open_socket(uint16_t local_port, int bind_any);
@@ -479,10 +511,7 @@ struct n2n_edge
     size_t              p2p_tx_bytes;
     size_t              p2p_rx_bytes;
 
-#ifdef _WIN32
     volatile int        keep_running;
-    HANDLE              tun_thread_handle;
-#endif
 
     /* Rate-limiting for P2P/PsP log messages */
     uint8_t             last_p2p_log_mac[N2N_MAC_SIZE];

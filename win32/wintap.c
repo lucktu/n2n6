@@ -440,6 +440,97 @@ ssize_t tuntap_read(struct tuntap_dev *tuntap, unsigned char *buf, size_t len) {
 }
 /* ************************************************ */
 
+/* Start an overlapped (non-blocking) TAP read operation.
+ *   Uses the device's persistent overlap_read state and read_buf[2000].
+ *   The read completion is signalled via overlap_read.hEvent (manual-reset).
+ *
+ *   Returns:
+ *     > 0 — Read completed SYNCHRONOUSLY (no IRP pending); return value is
+ *           the byte count.  Data is in tuntap->read_buf[].  read_pending
+ *           stays 0, caller should process data and then call this function
+ *           again to submit the next read (or if another read completed
+ *           synchronously just loop on the retval).
+ *       0 — Read submitted ASYNCHRONOUSLY, IRP pending.  read_pending set to
+ *           non-zero.  Caller waits on tuntap->overlap_read.hEvent then
+ *           calls tuntap_read_complete_overlapped to get the byte count.
+ *     < 0 — Error (submit failed).  read_pending is 0. */
+ssize_t tuntap_read_begin_overlapped(struct tuntap_dev *tuntap) {
+    uint32_t read_size = 0;
+
+    /* Cannot start a new read while one is still in flight */
+    if (tuntap->read_pending) {
+        SetLastError(ERROR_IO_INCOMPLETE);
+        return -1;
+    }
+
+    ResetEvent(tuntap->overlap_read.hEvent);
+
+    if (ReadFile(tuntap->device_handle,
+                 tuntap->read_buf,
+                 (uint32_t)sizeof(tuntap->read_buf),
+                 &read_size,
+                 &tuntap->overlap_read))
+    {
+        /* Synchronous completion — data already in read_buf.
+         *   read_pending stays 0 because no IRP is outstanding. */
+        return (ssize_t)read_size;
+    }
+
+    switch (GetLastError()) {
+    case ERROR_IO_PENDING:
+        /* Async IRP queued — caller waits on hEvent then calls
+         *   tuntap_read_complete_overlapped. */
+        tuntap->read_pending = 1;
+        return 0;
+    case ERROR_OPERATION_ABORTED:
+    case ERROR_INVALID_HANDLE:
+    case ERROR_HANDLE_EOF:
+        /* Normal during shutdown / idle — silent. */
+        return -1;
+    default: {
+        W32_ERROR(GetLastError(), error);
+        traceEvent(TRACE_WARNING, "tuntap_read_begin_overlapped ReadFile failed: %ls", error);
+        W32_ERROR_FREE(error);
+        return -1;
+    }
+    }
+}
+
+/* Collect the result of a previously submitted overlapped TAP read.
+ *   Must only be called after overlap_read.hEvent was signalled (or
+ *   synchronously completing paths want to retry a synchronous result).
+ *   Data is in tuntap->read_buf[].
+ *
+ *   Returns byte count (> 0) on success, < 0 on error.
+ *   Always clears read_pending before returning so the caller can
+ *   submit the next read via tuntap_read_begin_overlapped. */
+ssize_t tuntap_read_complete_overlapped(struct tuntap_dev *tuntap) {
+    uint32_t read_size = 0;
+
+    if (!GetOverlappedResult(tuntap->device_handle,
+                             &tuntap->overlap_read,
+                             &read_size,
+                             FALSE))
+    {
+        DWORD err = GetLastError();
+        tuntap->read_pending = 0;
+        if (err == ERROR_OPERATION_ABORTED || err == ERROR_INVALID_HANDLE ||
+            err == ERROR_HANDLE_EOF)
+        {
+            /* Normal during shutdown — silent. */
+            return -1;
+        }
+        W32_ERROR(err, error);
+        traceEvent(TRACE_WARNING, "tuntap_read_complete_overlapped failed: %ls", error);
+        W32_ERROR_FREE(error);
+        return -1;
+    }
+
+    tuntap->read_pending = 0;
+    return (ssize_t)read_size;
+}
+/* ************************************************ */
+
 ssize_t tuntap_write(struct tuntap_dev *tuntap, unsigned char *buf, size_t len) {
     if (!tuntap->write_thread_running)
         return -1;
@@ -500,6 +591,18 @@ void tuntap_close(struct tuntap_dev *tuntap) {
     if (tuntap->overlap_write.hEvent) {
         CloseHandle(tuntap->overlap_write.hEvent);
         tuntap->overlap_write.hEvent = NULL;
+    }
+
+    /* Release WinSock event handles (if any were created).  Note:
+     *   WSAEventSelect(s, NULL, 0) was implicitly called when the socket
+     *   was closed elsewhere; we only need to drop the HANDLE here. */
+    if (tuntap->udp_sock_event) {
+        CloseHandle(tuntap->udp_sock_event);
+        tuntap->udp_sock_event = NULL;
+    }
+    if (tuntap->udp_sock6_event) {
+        CloseHandle(tuntap->udp_sock6_event);
+        tuntap->udp_sock6_event = NULL;
     }
 }
 

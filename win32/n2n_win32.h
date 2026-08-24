@@ -118,6 +118,13 @@ typedef struct tuntap_dev {
     HANDLE write_event;
     HANDLE write_thread;
     volatile bool write_thread_running;
+
+    /* WinSock event handles for main-loop WFSO wake-up.
+     *   Bound via WSAEventSelect(FD_READ|FD_CLOSE) on the corresponding
+     *   socket.  Created in setup_sockets(); closed in tuntap_close().
+     *   Only meaningful on Windows. */
+    HANDLE udp_sock_event;   /* for udp_sock (IPv4) */
+    HANDLE udp_sock6_event;  /* for udp_sock6 (IPv6) */
 } tuntap_dev;
 
 #define W32_ERROR(rc, error_string) \

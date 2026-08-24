@@ -2761,6 +2761,12 @@ int main( int argc, char * const argv[] )
         sss.sock = open_socket(sss.lport, 1 /*bind ANY*/ );
         if (sss.sock != -1) {
             ipv4_available = 1;
+            /* supernode uses a small SNDBUF (256KB) instead of edge's 2MB:
+             * the kernel auto-doubles the requested size, so this still leaves
+             * plenty of headroom for forwarding bursts to many peers without
+             * holding large per-socket memory pools. */
+            { int snd = 256 * 1024;
+              setsockopt(sss.sock, SOL_SOCKET, SO_SNDBUF, (const char*)&snd, sizeof(snd)); }
         } else {
             traceEvent( TRACE_WARNING, "IPv4 socket failed, continuing without IPv4" );
             sss.sock = -1;
@@ -2770,6 +2776,9 @@ int main( int argc, char * const argv[] )
     if (ipv6) {
         sss.sock6 = open_socket6(sss.lport, 1 /*bind ANY*/ );
         if (sss.sock6 != -1) {
+            /* supernode: see SNDBUF note in IPv4 socket block above. */
+            { int snd = 256 * 1024;
+              setsockopt(sss.sock6, SOL_SOCKET, SO_SNDBUF, (const char*)&snd, sizeof(snd)); }
             /* Socket bound OK, but only mark IPv6 available if the system
              * has at least one non-link-local, non-loopback global IPv6 address.
              * A server with only fe80:: addresses cannot accept external IPv6 connections. */
@@ -2858,6 +2867,12 @@ int main( int argc, char * const argv[] )
     }
 
     sss.mgmt_sock = open_socket(sss.mgmt_port, 0 /* bind LOOPBACK */ );
+    if ( -1 != sss.mgmt_sock )
+    {
+        /* supernode: see SNDBUF note in IPv4 socket block above. */
+        int snd = 256 * 1024;
+        setsockopt(sss.mgmt_sock, SOL_SOCKET, SO_SNDBUF, (const char*)&snd, sizeof(snd));
+    }
     if ( -1 == sss.mgmt_sock )
     {
         /* Resolve error string outside the traceEvent() macro — MSVC rejects
