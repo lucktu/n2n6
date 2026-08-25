@@ -591,6 +591,94 @@ size_t decode_PACKET( n2n_PACKET_t * pkt,
     return retval;
 }
 
+
+/* Compact PACKET header (tag N2N_PKT_VERSION_COMPACT): ttl(1) + flags(2) + dstMac(6) + [sock(8-20)]
+ *
+ * Saves ~24 bytes per packet by omitting community(16), srcMac(6) and
+ * transform(2). The receiver restores community and local transform from
+ * its own config, and srcMac via a sender-address lookup.
+ *
+ * The leading field uses N2N_PKT_VERSION_COMPACT (a non-version format tag,
+ * not a protocol-version number) so the receiver can tell a compact header
+ * apart from the legacy common header by the very first byte.
+ *
+ * The caller is responsible for setting N2N_FLAGS_SOCKET in cmn->flags when
+ * a sock is provided, and FROM_SUPERNODE/SOCKET flags for SN relay. */
+ssize_t encode_compact_header( uint8_t * base,
+                               size_t * idx,
+                               const n2n_common_t * cmn,
+                               const n2n_mac_t dstMac,
+                               const n2n_sock_t * sock )
+{
+    size_t idx0 = *idx;
+
+    encode_uint8( base, idx, N2N_PKT_VERSION_COMPACT ); /* compact-format tag */
+    encode_uint8( base, idx, cmn->ttl );
+
+    /* Encode flags: pc in low 5 bits, flags in high bits */
+    uint16_t flags = (cmn->pc & N2N_FLAGS_TYPE_MASK);
+    flags |= (cmn->flags & N2N_FLAGS_BITS_MASK);
+    encode_uint16( base, idx, flags );
+
+    encode_mac( base, idx, dstMac );
+
+    /* Optional sock (e.g. original sender's address for SN relay) */
+    if ( sock && sock->family != 0 )
+    {
+        /* Re-encode flags with SOCKET bit, caller must ensure cmn->flags has it set */
+        encode_sock( base, idx, sock );
+    }
+
+    return (ssize_t)(*idx - idx0);
+}
+
+
+ssize_t decode_compact_header( n2n_common_t * cmn,
+                               n2n_mac_t dstMac,
+                               n2n_sock_t * sock,
+                               const uint8_t * base,
+                               size_t * rem,
+                               size_t * idx )
+{
+    size_t idx0 = *idx;
+    uint8_t version = 0;
+
+    decode_uint8( &version, base, rem, idx );
+
+    if ( N2N_PKT_VERSION_COMPACT != version )
+    {
+        return -1;
+    }
+
+    decode_uint8( &(cmn->ttl), base, rem, idx );
+    decode_uint16( &(cmn->flags), base, rem, idx );
+    cmn->pc = (n2n_pc_t)( cmn->flags & N2N_FLAGS_TYPE_MASK );
+    cmn->flags &= N2N_FLAGS_BITS_MASK;
+
+    decode_mac( dstMac, base, rem, idx );
+
+    if ( cmn->flags & N2N_FLAGS_SOCKET )
+    {
+        if ( sock )
+        {
+            decode_sock( sock, base, rem, idx );
+        }
+        else
+        {
+            /* Skip sock bytes if caller didn't provide a buffer */
+            n2n_sock_t tmp;
+            decode_sock( &tmp, base, rem, idx );
+        }
+    }
+    else if ( sock )
+    {
+        memset( sock, 0, sizeof(n2n_sock_t) );
+    }
+
+    return ((ssize_t)(*idx)) - (ssize_t)idx0;
+}
+
+
 size_t encode_PROBE( uint8_t * base,
                      size_t * idx,
                      const n2n_common_t * common,

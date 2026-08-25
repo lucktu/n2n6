@@ -87,6 +87,11 @@ struct community_stats {
     uint32_t next_ip;           /* host byte order, 0 = not yet initialised */
     struct mac_ip_entry *mac_ip_map; /* MAC -> IP cache for this community */
 
+    /* Cache for compact broadcast optimization: all_compact == 1 means every edge in this
+     * community is compact_capable, so SN can skip broadcast conversion check.
+     * false means there's at least one legacy edge, need check or force conversion. */
+    int             all_compact;
+
     struct community_stats *next;
 };
 
@@ -120,6 +125,7 @@ static struct community_stats * get_community_stats(
     s->last_second = now;
     s->next_ip     = 0x0a400002; /* 10.64.0.2 - per-community start */
     s->mac_ip_map  = NULL;
+    s->all_compact = 1;          /* assume all new edges are compact until proven otherwise */
     s->next = *head;
     *head = s;
     return s;
@@ -1785,6 +1791,252 @@ static int process_udp( n2n_sn_t * sss,
 
     rem = udp_size; /* Counts down bytes of packet to protect against buffer overruns. */
     idx = 0; /* marches through packet header as parts are decoded. */
+
+    /* Check for compact format (leading tag N2N_PKT_VERSION_COMPACT) */
+    if ( udp_size > 0 && udp_buf[0] == N2N_PKT_VERSION_COMPACT )
+    {
+        n2n_mac_t compact_dstMac;
+        n2n_sock_t compact_sock;
+        n2n_common_t cmn2;
+        uint8_t encbuf[N2N_SN_PKTBUF_SIZE];
+        size_t encx = 0;
+        int unicast;
+        const uint8_t *rec_buf;
+        struct peer_info *sender_peer = NULL;
+
+        memset( &compact_sock, 0, sizeof(compact_sock) );
+
+        if ( decode_compact_header( &cmn, compact_dstMac, &compact_sock, udp_buf, &rem, &idx ) < 0 )
+        {
+            traceEvent( TRACE_DEBUG, "Failed to decode compact header" );
+            return -1;
+        }
+
+        msg_type = cmn.pc;
+        from_supernode = cmn.flags & N2N_FLAGS_FROM_SUPERNODE;
+
+        if ( cmn.ttl < 1 )
+        {
+            traceEvent( TRACE_WARNING, "Expired TTL in compact packet" );
+            return 0;
+        }
+
+        --(cmn.ttl);
+
+        if ( msg_type != MSG_TYPE_PACKET )
+            return 0;
+
+        /* Find the sender edge: for WS scan peer->ws pointer, for UDP scan socket */
+        if ( ws_sender )
+        {
+            struct peer_info *scan = sss->edges;
+            while ( scan )
+            {
+                if ( scan->ws == ws_sender )
+                {
+                    sender_peer = scan;
+                    break;
+                }
+                scan = scan->next;
+            }
+        }
+        else
+        {
+            sender_peer = find_peer_by_sock( sss->edges, sender_sock );
+        }
+
+        if ( !sender_peer )
+        {
+            traceEvent( TRACE_DEBUG, "compact: unknown sender, dropping" );
+            return 0;
+        }
+
+        /* Fill community from sender's registration */
+        memcpy( cmn.community, sender_peer->community_name, N2N_COMMUNITY_SIZE );
+        sender_peer->compact_capable = 1;
+
+        sss->stats.last_fwd = now;
+
+        unicast = (0 == is_multi_broadcast( compact_dstMac ));
+
+        traceEvent( TRACE_DEBUG, "Rx compact PACKET (%s) %s -> %s %s",
+                    (unicast?"unicast":"multicast"),
+                    macaddr_str( mac_buf, sender_peer->mac_addr ),
+                    macaddr_str( mac_buf2, compact_dstMac ),
+                    (from_supernode?"from sn":"local") );
+
+        if ( !from_supernode )
+        {
+            /* Edge → SN: re-encode as compact with FROM_SUPERNODE + SOCKET */
+            memcpy( &cmn2, &cmn, sizeof( n2n_common_t ) );
+            cmn2.flags |= N2N_FLAGS_SOCKET | N2N_FLAGS_FROM_SUPERNODE;
+
+            /* Fill sock from the original sender's physical address */
+            if ( sender_sock->sa_family == AF_INET )
+            {
+                const struct sockaddr_in *sin = (const struct sockaddr_in *)sender_sock;
+                compact_sock.family = AF_INET;
+                compact_sock.port = ntohs( sin->sin_port );
+                memcpy( compact_sock.addr.v4, &sin->sin_addr, 4 );
+            }
+            else if ( sender_sock->sa_family == AF_INET6 )
+            {
+                const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sender_sock;
+                compact_sock.family = AF_INET6;
+                compact_sock.port = ntohs( sin6->sin6_port );
+                memcpy( compact_sock.addr.v6, &sin6->sin6_addr, 16 );
+            }
+
+            rec_buf = encbuf;
+            encx = 0;
+            encode_compact_header( encbuf, &encx, &cmn2, compact_dstMac, &compact_sock );
+            /* Copy the encrypted payload unchanged */
+            encode_buf( encbuf, &encx, (udp_buf + idx), (udp_size - idx) );
+
+            /* Update sender's edge address in the edge table */
+            {
+                if ( sender_sock->sa_family == AF_INET && sender_peer->sock.family == AF_INET )
+                {
+                    const struct sockaddr_in *sin = (const struct sockaddr_in *)sender_sock;
+                    if ( sender_peer->sock.port != ntohs(sin->sin_port) ||
+                         memcmp( sender_peer->sock.addr.v4, &sin->sin_addr, 4 ) != 0 )
+                    {
+                        sender_peer->sock.port = ntohs(sin->sin_port);
+                        memcpy( sender_peer->sock.addr.v4, &sin->sin_addr, 4 );
+                        sender_peer->last_seen = now;
+                        traceEvent( TRACE_DEBUG, "Edge %s addr updated from compact PACKET",
+                                    macaddr_str( mac_buf, sender_peer->mac_addr ) );
+                    }
+                }
+                else if ( sender_sock->sa_family == AF_INET6 && sender_peer->sock6.family == AF_INET6 )
+                {
+                    const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sender_sock;
+                    if ( sender_peer->sock6.port != ntohs(sin6->sin6_port) ||
+                         memcmp( sender_peer->sock6.addr.v6, &sin6->sin6_addr, 16 ) != 0 )
+                    {
+                        sender_peer->sock6.port = ntohs(sin6->sin6_port);
+                        memcpy( sender_peer->sock6.addr.v6, &sin6->sin6_addr, 16 );
+                        sender_peer->last_seen = now;
+                        traceEvent( TRACE_DEBUG, "Edge %s addr updated from compact PACKET",
+                                    macaddr_str( mac_buf, sender_peer->mac_addr ) );
+                    }
+                }
+            }
+        }
+        else
+        {
+            /* Already from a supernode. Nothing to modify, just pass to destination. */
+            traceEvent( TRACE_DEBUG, "Rx compact PACKET fwd unmodified" );
+            rec_buf = udp_buf;
+            encx = udp_size;
+        }
+
+        /* Common section to forward the final product.
+         * Before forwarding, check if any receiver is legacy (doesn't support compact).
+         * If so, convert compact→legacy so old edges can still receive the packet.
+         * For unicast, we also keep dest around so the conversion block can use
+         * dest->transform_id as a fallback if sender_peer->transform_id is 0.
+         *
+         * Broadcast uses a community-level cache (all_compact) to avoid scanning
+         * all peers on every packet: once a legacy PACKET is seen in the community,
+         * all_compact is set to 0 and all subsequent broadcasts are converted
+         * conservatively. This eliminates O(N) scanning per broadcast packet. */
+        {
+            int all_receivers_compact = 0;
+            struct peer_info *dest = NULL; /* used by unicast path + conversion fallback */
+            if ( unicast )
+            {
+                dest = find_peer_by_mac( sss->edges, compact_dstMac );
+                if ( !dest )
+                {
+                    /* Unknown destination — skip conversion (try_forward will drop) */
+                    all_receivers_compact = 1;
+                }
+                else if ( dest->compact_capable )
+                {
+                    all_receivers_compact = 1;
+                }
+            }
+            else
+            {
+                /* Broadcast: use community-level cache instead of scanning all peers.
+                 * all_compact=1 means ALL peers are compact-capable → no conversion.
+                 * all_compact=0 means at least one legacy peer exists → convert conservatively. */
+                struct community_stats *cs = get_community_stats(&sss->comm_stats, cmn.community, now);
+                if ( cs && cs->all_compact )
+                    all_receivers_compact = 1;
+                /* else: all_receivers_compact stays 0, conversion path follows */
+            }
+
+            if ( !all_receivers_compact )
+            {
+                /* Convert to legacy format for old edges */
+                uint8_t legacy_buf[N2N_SN_PKTBUF_SIZE];
+                size_t legacy_x = 0;
+                n2n_common_t legacy_cmn;
+                n2n_PACKET_t legacy_pkt;
+
+                memcpy( &legacy_cmn, &cmn, sizeof( n2n_common_t ) );
+                legacy_cmn.flags |= N2N_FLAGS_FROM_SUPERNODE;
+                /* Add SOCKET so the legacy PACKET includes the sender's physical address */
+                if ( !(legacy_cmn.flags & N2N_FLAGS_SOCKET) )
+                    legacy_cmn.flags |= N2N_FLAGS_SOCKET;
+
+                memset( &legacy_pkt, 0, sizeof( legacy_pkt ) );
+                memcpy( legacy_pkt.srcMac, sender_peer->mac_addr, N2N_MAC_SIZE );
+                memcpy( legacy_pkt.dstMac, compact_dstMac, N2N_MAC_SIZE );
+                legacy_pkt.transform = sender_peer->transform_id;
+
+                /* Fallback: if sender's transform_id is unknown (compact-only sender),
+                 * try the destination's transform_id (all edges in a community share
+                 * the same transform). */
+                if ( legacy_pkt.transform == 0 && dest && dest->transform_id != 0 )
+                    legacy_pkt.transform = dest->transform_id;
+
+                /* Use the sender's physical sock (from the compact-header sock if present,
+                 * otherwise from the recvfrom socket) */
+                if ( compact_sock.family != 0 )
+                    legacy_pkt.sock = compact_sock;
+                else if ( sender_sock->sa_family == AF_INET )
+                {
+                    const struct sockaddr_in *sin = (const struct sockaddr_in *)sender_sock;
+                    legacy_pkt.sock.family = AF_INET;
+                    legacy_pkt.sock.port = ntohs( sin->sin_port );
+                    memcpy( legacy_pkt.sock.addr.v4, &sin->sin_addr, 4 );
+                }
+                else if ( sender_sock->sa_family == AF_INET6 )
+                {
+                    const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sender_sock;
+                    legacy_pkt.sock.family = AF_INET6;
+                    legacy_pkt.sock.port = ntohs( sin6->sin6_port );
+                    memcpy( legacy_pkt.sock.addr.v6, &sin6->sin6_addr, 16 );
+                }
+
+                encode_common( legacy_buf, &legacy_x, &legacy_cmn );
+                encode_PACKET( legacy_buf, &legacy_x, &legacy_cmn, &legacy_pkt );
+                encode_buf( legacy_buf, &legacy_x, (udp_buf + idx), (udp_size - idx) );
+
+                rec_buf = legacy_buf;
+                encx = legacy_x;
+
+                traceEvent( TRACE_DEBUG, "compact→legacy conversion for %s %s",
+                            (unicast?"unicast":"broadcast"),
+                            macaddr_str( mac_buf, compact_dstMac ) );
+            }
+        }
+
+        if ( unicast )
+        {
+            try_forward( sss, &cmn, compact_dstMac, rec_buf, encx );
+        }
+        else
+        {
+            try_broadcast( sss, &cmn, sender_peer->mac_addr, rec_buf, encx );
+        }
+
+        return 0;
+    }
+
     if ( decode_common(&cmn, udp_buf, &rem, &idx) < 0 )
     {
         traceEvent( TRACE_DEBUG, "Failed to decode common section" );
@@ -1818,6 +2070,13 @@ static int process_udp( n2n_sn_t * sss,
 
         sss->stats.last_fwd=now;
         decode_PACKET( &pkt, &cmn, udp_buf, &rem, &idx );
+
+        /* A legacy PACKET means at least one edge in this community is legacy.
+         * Invalidate the all_compact cache so SN does proper broadcast conversion. */
+        {
+            struct community_stats *cs = get_community_stats(&sss->comm_stats, cmn.community, now);
+            if (cs) cs->all_compact = 0;
+        }
 
         unicast = (0 == is_multi_broadcast(pkt.dstMac) );
 
@@ -1863,6 +2122,7 @@ static int process_udp( n2n_sn_t * sss,
             {
                 struct peer_info *sender_edge = find_peer_by_mac(sss->edges, pkt.srcMac);
                 if (sender_edge) {
+                    sender_edge->transform_id = pkt.transform;
                     if (sender_sock->sa_family == AF_INET && sender_edge->sock.family == AF_INET) {
                         struct sockaddr_in *si = (struct sockaddr_in *)sender_sock;
                         if (sender_edge->sock.port != ntohs(si->sin_port) ||

@@ -2574,7 +2574,6 @@ static void send_packet2net(n2n_edge_t * eee,
     n2n_mac_t destMac;
 
     n2n_common_t cmn;
-    n2n_PACKET_t pkt;
 
     uint8_t pktbuf[N2N_PKT_BUF_SIZE];
     size_t idx=0;
@@ -2623,28 +2622,54 @@ static void send_packet2net(n2n_edge_t * eee,
     /* Once processed, send to destination in PACKET */
     tx_transop_idx = edge_choose_tx_transop( eee );
 
-    /* Build the header from scratch on every packet.
-     * No shared cache: send_packet2net is called from both the TAP thread
-     * and the main loop thread, so a shared header template would be
-     * written/read without locking (data race). All state here is local. */
+    /* Check if the destination peer supports compact format.
+     * If unknown (first packet), send legacy and let the peer upgrade
+     * opportunistically when it responds with a compact packet. */
+    int use_compact = 0;
+    PEERS_LOCK( eee );
+    {
+        struct peer_info *dest = find_peer_by_mac( eee->known_peers, destMac );
+        if ( !dest )
+            dest = find_peer_by_mac( eee->pending_peers, destMac );
+        if ( dest && dest->compact_capable )
+            use_compact = 1;
+    }
+    PEERS_UNLOCK( eee );
+
     memset( &cmn, 0, sizeof(cmn) );
     cmn.ttl = N2N_DEFAULT_TTL;
     cmn.pc = n2n_packet;
-    cmn.flags=0;
-    memcpy( cmn.community, eee->community_name, N2N_COMMUNITY_SIZE );
+    cmn.flags = 0;
 
-    memset( &pkt, 0, sizeof(pkt) );
-    memcpy( pkt.srcMac, eee->device.mac_addr, N2N_MAC_SIZE);
-    memcpy( pkt.dstMac, destMac, N2N_MAC_SIZE);
+    if ( use_compact )
+    {
+        /* Compact format: no community, srcMac, or transform.
+         * Receiver fills these from local context or peer table lookup. */
+        idx=0;
+        encode_compact_header( pktbuf, &idx, &cmn, destMac, NULL );
 
-    pkt.sock.family=0;
-    pkt.transform = eee->transop[tx_transop_idx].transform_id;
+        traceEvent( TRACE_DEBUG, "encoded compact PACKET header of size=%u transform %u (idx=%u)",
+                    (unsigned int)idx, (unsigned int)eee->transop[tx_transop_idx].transform_id, (unsigned int)tx_transop_idx );
+    }
+    else
+    {
+        /* Legacy format for old peers or first-contact packets */
+        n2n_PACKET_t pkt;
 
-    idx=0;
-    encode_PACKET( pktbuf, &idx, &cmn, &pkt );
+        memcpy( cmn.community, eee->community_name, N2N_COMMUNITY_SIZE );
 
-    traceEvent( TRACE_DEBUG, "encoded PACKET header of size=%u transform %u (idx=%u)",
-                (unsigned int)idx, (unsigned int)eee->transop[tx_transop_idx].transform_id, (unsigned int)tx_transop_idx );
+        memset( &pkt, 0, sizeof(pkt) );
+        memcpy( pkt.srcMac, eee->device.mac_addr, N2N_MAC_SIZE );
+        memcpy( pkt.dstMac, destMac, N2N_MAC_SIZE );
+        pkt.sock.family = 0;
+        pkt.transform = eee->transop[tx_transop_idx].transform_id;
+
+        idx=0;
+        encode_PACKET( pktbuf, &idx, &cmn, &pkt );
+
+        traceEvent( TRACE_DEBUG, "encoded legacy PACKET header of size=%u transform %u (idx=%u)",
+                    (unsigned int)idx, (unsigned int)eee->transop[tx_transop_idx].transform_id, (unsigned int)tx_transop_idx );
+    }
 
     idx += eee->transop[tx_transop_idx].fwd( &(eee->transop[tx_transop_idx]),
                                              pktbuf+idx, N2N_PKT_BUF_SIZE-idx,
@@ -3010,7 +3035,6 @@ static void fmt_bytes(char *buf, size_t bufsize, size_t bytes) {
 static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
     uint8_t udp_buf[N2N_PKT_BUF_SIZE];      /* Complete UDP packet */
     ssize_t recvlen;
-    _unused_ ssize_t sendlen;
 #ifdef _WIN32
     struct sockaddr_storage sender_sock;
 #else
@@ -3613,6 +3637,113 @@ static int readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
     }
 
 process_n2n_packet:
+
+    /* Check for compact format (leading tag N2N_PKT_VERSION_COMPACT) */
+    if ( recvlen > 0 && udp_buf[0] == N2N_PKT_VERSION_COMPACT )
+    {
+        n2n_mac_t compact_dstMac;
+        n2n_sock_t compact_sock;
+        n2n_mac_t compact_srcMac;
+
+        memset( &compact_sock, 0, sizeof(compact_sock) );
+
+        rem = recvlen;
+        idx = 0;
+        if ( decode_compact_header( &cmn, compact_dstMac, &compact_sock, udp_buf, &rem, &idx ) < 0 )
+        {
+            traceEvent( TRACE_ERROR, "Failed to decode compact header" );
+            return 0;
+        }
+
+        /* Fill community from local config */
+        memcpy( cmn.community, eee->community_name, N2N_COMMUNITY_SIZE );
+
+        msg_type = cmn.pc;
+        from_supernode = cmn.flags & N2N_FLAGS_FROM_SUPERNODE;
+
+        if ( msg_type != MSG_TYPE_PACKET )
+            return 0;
+
+        /* Determine srcMac by looking up the sender from socket */
+        if ( from_supernode && compact_sock.family != 0 )
+        {
+            /* SN relay: sock in packet contains original sender's address */
+            struct peer_info *src_peer = NULL;
+            PEERS_LOCK(eee);
+            if ( compact_sock.family == AF_INET )
+            {
+                struct sockaddr_in sin;
+                memset( &sin, 0, sizeof(sin) );
+                sin.sin_family = AF_INET;
+                sin.sin_port = htons( compact_sock.port );
+                memcpy( &sin.sin_addr, compact_sock.addr.v4, 4 );
+                src_peer = find_peer_by_sock( eee->known_peers, (struct sockaddr *)&sin );
+                if ( !src_peer )
+                    src_peer = find_peer_by_sock( eee->pending_peers, (struct sockaddr *)&sin );
+            }
+            else if ( compact_sock.family == AF_INET6 )
+            {
+                struct sockaddr_in6 sin6;
+                memset( &sin6, 0, sizeof(sin6) );
+                sin6.sin6_family = AF_INET6;
+                sin6.sin6_port = htons( compact_sock.port );
+                memcpy( &sin6.sin6_addr, compact_sock.addr.v6, 16 );
+                src_peer = find_peer_by_sock( eee->known_peers, (struct sockaddr *)&sin6 );
+                if ( !src_peer )
+                    src_peer = find_peer_by_sock( eee->pending_peers, (struct sockaddr *)&sin6 );
+            }
+            PEERS_UNLOCK(eee);
+            if ( !src_peer )
+            {
+                traceEvent( TRACE_DEBUG, "compact: unknown sender from sock, dropping" );
+                return 0;
+            }
+            src_peer->compact_capable = 1;
+            memcpy( compact_srcMac, src_peer->mac_addr, N2N_MAC_SIZE );
+            orig_sender = &compact_sock;
+        }
+        else if ( !from_supernode )
+        {
+            /* P2P: look up sender from the recvfrom source socket */
+            struct peer_info *src_peer = NULL;
+            PEERS_LOCK(eee);
+            src_peer = find_peer_by_sock( eee->known_peers, (struct sockaddr *)&sender_sock );
+            if ( !src_peer )
+                src_peer = find_peer_by_sock( eee->pending_peers, (struct sockaddr *)&sender_sock );
+            PEERS_UNLOCK(eee);
+            if ( !src_peer )
+            {
+                traceEvent( TRACE_DEBUG, "compact: unknown P2P sender, dropping" );
+                return 0;
+            }
+            src_peer->compact_capable = 1;
+            memcpy( compact_srcMac, src_peer->mac_addr, N2N_MAC_SIZE );
+            orig_sender = &sender;
+        }
+        else
+        {
+            /* from_supernode but no sock in packet */
+            traceEvent( TRACE_DEBUG, "compact: from_supernode without sock, dropping" );
+            return 0;
+        }
+
+        /* Build PACKET struct for handle_PACKET, filling in reconstructed fields */
+        n2n_PACKET_t compact_pkt;
+        memset( &compact_pkt, 0, sizeof(compact_pkt) );
+        memcpy( compact_pkt.srcMac, compact_srcMac, N2N_MAC_SIZE );
+        memcpy( compact_pkt.dstMac, compact_dstMac, N2N_MAC_SIZE );
+        if ( from_supernode )
+            compact_pkt.sock = compact_sock;
+        compact_pkt.transform = eee->transop[eee->tx_transop_idx].transform_id;
+
+        traceEvent(TRACE_DEBUG, "Rx compact PACKET from %s (%s)",
+                   sock_to_cstr(sockbuf1, &sender),
+                   sock_to_cstr(sockbuf2, orig_sender) );
+
+        handle_PACKET( eee, &cmn, &compact_pkt, orig_sender, udp_buf + idx, recvlen - idx );
+        traceEvent(TRACE_DEBUG, "handle_PACKET returned (compact)");
+        return 1;
+    }
 
     /* hexdump( udp_buf, recvlen ); */
 

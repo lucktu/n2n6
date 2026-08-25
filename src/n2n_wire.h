@@ -24,6 +24,8 @@
 #endif /* #if defined(WIN32) */
 
 #define N2N_PKT_VERSION                 2
+#define N2N_PKT_VERSION_COMPACT         0xE5    /* 1st byte of a compact packet; NOT a protocol-version number, just a format
+                                                   tag so the compact header and the legacy common header share the same leading field */
 #define N2N_DEFAULT_TTL                 2       /* can be forwarded twice at most */
 #define N2N_COMMUNITY_SIZE              16
 #define N2N_MAC_SIZE                    6
@@ -424,6 +426,20 @@ size_t decode_QUERY_PEER( n2n_QUERY_PEER_t * pkt,
                           const n2n_common_t * cmn,
                           const uint8_t * base,
                           size_t * rem, size_t * idx );
+
+/* Compact PACKET format (leading tag N2N_PKT_VERSION_COMPACT): ttl(1) + flags(2) + dstMac(6) + [sock] */
+ssize_t encode_compact_header( uint8_t * base,
+                               size_t * idx,
+                               const n2n_common_t * cmn,
+                               const n2n_mac_t dstMac,
+                               const n2n_sock_t * sock );
+
+ssize_t decode_compact_header( n2n_common_t * cmn,
+                               n2n_mac_t dstMac,
+                               n2n_sock_t * sock,
+                               const uint8_t * base,
+                               size_t * rem,
+                               size_t * idx );
 
 #endif /* #if !defined( N2N_WIRE_H_ ) */
 

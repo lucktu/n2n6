@@ -416,6 +416,30 @@ struct peer_info * find_peer_by_mac( struct peer_info * list, const n2n_mac_t ma
 }
 
 
+struct peer_info * find_peer_by_sock( struct peer_info * list, const struct sockaddr * sa )
+{
+    while (list != NULL)
+    {
+        if (sa->sa_family == AF_INET && list->sock.family == AF_INET)
+        {
+            const struct sockaddr_in *sin = (const struct sockaddr_in *)sa;
+            if (list->sock.port == ntohs(sin->sin_port) &&
+                memcmp(list->sock.addr.v4, &sin->sin_addr, 4) == 0)
+                return list;
+        }
+        if (sa->sa_family == AF_INET6 && list->sock6.family == AF_INET6)
+        {
+            const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)sa;
+            if (list->sock6.port == ntohs(sin6->sin6_port) &&
+                memcmp(list->sock6.addr.v6, &sin6->sin6_addr, 16) == 0)
+                return list;
+        }
+        list = list->next;
+    }
+    return NULL;
+}
+
+
 /** Return the number of elements in the list.
  *
  */
