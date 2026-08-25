@@ -258,6 +258,183 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
 }
 
 
+#elif defined (__ARM_NEON)
+// NEON support ---------------------------------------------------------------------------------
+
+
+#include <arm_neon.h>
+
+
+#define SL  vshlq_n_u32
+#define SR  vshrq_n_u32
+#define XOR veorq_u32
+#define AND vandq_u32
+#define ADD vaddq_u32
+#define ROL(X,r) (XOR(SL(X,r),SR(X,(32-r))))
+
+#define ROL8(X)  ROL(X,8)
+#define ROL16(X) ROL(X,16)
+
+
+/* CC20_PERMUTE_ROWS:  B←[0,3,2,1], C←[1,0,3,2], D←[2,1,0,3] */
+static inline uint32x4_t neon_shuffle_0_3_2_1 (uint32x4_t v) {
+    uint32_t tmp = vgetq_lane_u32(v, 1);
+    v = vsetq_lane_u32(vgetq_lane_u32(v, 3), v, 1);
+    v = vsetq_lane_u32(tmp, v, 3);
+    return v;
+}
+
+static inline uint32x4_t neon_shuffle_1_0_3_2 (uint32x4_t v) {
+    return vcombine_u32(vrev64_u32(vget_low_u32(v)),
+                        vrev64_u32(vget_high_u32(v)));
+}
+
+static inline uint32x4_t neon_shuffle_2_1_0_3 (uint32x4_t v) {
+    uint32_t tmp = vgetq_lane_u32(v, 0);
+    v = vsetq_lane_u32(vgetq_lane_u32(v, 2), v, 0);
+    v = vsetq_lane_u32(tmp, v, 2);
+    return v;
+}
+
+#define CC20_PERMUTE_ROWS(A,B,C,D)                     \
+    B = neon_shuffle_2_1_0_3(B);                       \
+    C = neon_shuffle_1_0_3_2(C);                       \
+    D = neon_shuffle_0_3_2_1(D)
+
+#define CC20_PERMUTE_ROWS_INV(A,B,C,D)                 \
+    B = neon_shuffle_0_3_2_1(B);                       \
+    C = neon_shuffle_1_0_3_2(C);                       \
+    D = neon_shuffle_2_1_0_3(D)
+
+#define CC20_ODD_ROUND(A,B,C,D)            \
+    /* odd round */                        \
+    A = ADD(A, B); D = ROL16(XOR(D, A));   \
+    C = ADD(C, D); B = ROL(XOR(B, C), 12); \
+    A = ADD(A, B); D = ROL8(XOR(D, A));    \
+    C = ADD(C, D); B = ROL(XOR(B, C),  7)
+
+#define CC20_EVEN_ROUND(A,B,C,D)       \
+    CC20_PERMUTE_ROWS    (A, B, C, D); \
+    CC20_ODD_ROUND       (A, B, C, D); \
+    CC20_PERMUTE_ROWS_INV(A, B, C, D)
+
+#define CC20_DOUBLE_ROUND(A,B,C,D)   \
+    CC20_ODD_ROUND (A, B, C, D);     \
+    CC20_EVEN_ROUND(A, B, C, D)
+
+#define STOREXOR(O,I,X)                                                   \
+    vst1q_u32((uint32_t*)(O), XOR(vld1q_u32((const uint32_t*)(I)), X));  \
+    I += 16; O += 16
+
+
+static const uint32_t neon_one_arr[4] = {1, 0, 0, 0};
+static const uint32_t neon_two_arr[4] = {2, 0, 0, 0};
+
+
+int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
+                const unsigned char *iv, cc20_context_t *ctx) {
+
+    uint32x4_t a, b, c, d, k0, k1, k2, k3, k4, k5, k6, k7;
+
+    uint8_t   *keystream8 = (uint8_t*)ctx->keystream32;
+
+    const uint8_t *magic_constant = (uint8_t*)"expand 32-byte k";
+
+    const uint32x4_t ONE = vld1q_u32(neon_one_arr);
+    const uint32x4_t TWO = vld1q_u32(neon_two_arr);
+
+    a = vld1q_u32((const uint32_t*)magic_constant);
+    b = vld1q_u32((const uint32_t*)(ctx->key));
+    c = vld1q_u32((const uint32_t*)((ctx->key)+16));
+    d = vld1q_u32((const uint32_t*)iv);
+
+    while(in_len >= 128) {
+        k0 = a; k1 = b; k2 = c; k3 = d;
+        k4 = a; k5 = b; k6 = c; k7 = ADD(d, ONE);
+
+        /* 10 double rounds -- two in parallel to make better use of all 8 NEON registers */
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3); CC20_DOUBLE_ROUND(k4, k5, k6, k7);
+
+        k0 = ADD(k0, a); k1 = ADD(k1, b); k2 = ADD(k2, c); k3 = ADD(k3, d);
+        k4 = ADD(k4, a); k5 = ADD(k5, b); k6 = ADD(k6, c); k7 = ADD(ADD(k7, d), ONE);
+
+        STOREXOR(out, in, k0); STOREXOR(out, in, k1); STOREXOR(out, in, k2); STOREXOR(out, in, k3);
+        STOREXOR(out, in, k4); STOREXOR(out, in, k5); STOREXOR(out, in, k6); STOREXOR(out, in, k7);
+
+        /* increment counter, make sure it is and stays little endian in memory */
+        d = ADD(d, TWO);
+
+        in_len -= 128;
+    }
+
+    if(in_len >= 64) {
+        k0 = a; k1 = b; k2 = c; k3 = d;
+
+        /* 10 double rounds */
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+
+        k0 = ADD(k0, a); k1 = ADD(k1, b); k2 = ADD(k2, c); k3 = ADD(k3, d);
+
+        STOREXOR(out, in, k0); STOREXOR(out, in, k1); STOREXOR(out, in, k2); STOREXOR(out, in, k3);
+
+        /* increment counter, make sure it is and stays little endian in memory */
+        d = ADD(d, ONE);
+
+        in_len -= 64;
+    }
+
+    if(in_len) {
+        k0 = a; k1 = b; k2 = c; k3 = d;
+
+        /* 10 double rounds */
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+        CC20_DOUBLE_ROUND(k0, k1, k2, k3);
+
+        k0 = ADD(k0, a); k1 = ADD(k1, b); k2 = ADD(k2, c); k3 = ADD(k3, d);
+
+        vst1q_u32((uint32_t*)&(ctx->keystream32[0]), k0);
+        vst1q_u32((uint32_t*)&(ctx->keystream32[4]), k1);
+        vst1q_u32((uint32_t*)&(ctx->keystream32[8]), k2);
+        vst1q_u32((uint32_t*)&(ctx->keystream32[12]), k3);
+
+        /* keep in mind that out and in got increased inside the last loop
+         * and point to current position now */
+        while(in_len > 0) {
+            in_len--;
+            out[in_len] = in[in_len] ^ keystream8[in_len];
+        }
+    }
+
+    return(0);
+}
+
+
 #else // plain C --------------------------------------------------------------------------------------------------
 
 
@@ -404,7 +581,7 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
 }
 
 
-#endif // openSSL 1.1, plain C ------------------------------------------------------------------------------------
+#endif // openSSL 1.1, SSE2, NEON, plain C ------------------------------------------------------------------------
 
 
 int cc20_init (const unsigned char *key, cc20_context_t **ctx) {

@@ -61,6 +61,18 @@ typedef struct cc20_context {
 } cc20_context_t;
 
 
+#elif defined (__ARM_NEON)
+// NEON support ---------------------------------------------------------------------------------
+
+
+#include <arm_neon.h>
+
+typedef struct cc20_context {
+    uint32x4_t keystream32[4];
+    uint8_t key[CC20_KEY_BYTES];
+} cc20_context_t;
+
+
 #else // plain C --------------------------------------------------------------------------------------------------
 
 
@@ -71,7 +83,7 @@ typedef struct cc20_context {
 } cc20_context_t;
 
 
-#endif // openSSL 1.1, plain C ------------------------------------------------------------------------------------
+#endif // openSSL 1.1, SSE2, NEON, plain C ------------------------------------------------------------------------
 
 
 int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,

@@ -40,15 +40,14 @@ static ssize_t transop_encode_cc20(n2n_trans_op_t *arg,
     if ((in_len + TRANSOP_CC20_PREAMBLE_SIZE) > out_len) return -1;
 
     size_t idx = 0;
-    uint8_t enc_ivec[N2N_CC20_IVEC_SIZE];
 
     encode_uint8(outbuf, &idx, N2N_CC20_TRANSFORM_VERSION);
 
-    /* IV from fast PRNG (no syscall overhead) */
-    fast_rand_bytes(enc_ivec, N2N_CC20_IVEC_SIZE);
-    encode_buf(outbuf, &idx, enc_ivec, N2N_CC20_IVEC_SIZE);
+    /* Write IV directly to outbuf (no intermediate copy) */
+    fast_rand_bytes(outbuf + idx, N2N_CC20_IVEC_SIZE);
+    idx += N2N_CC20_IVEC_SIZE;
 
-    cc20_crypt(outbuf + TRANSOP_CC20_PREAMBLE_SIZE, inbuf, in_len, enc_ivec, priv->ctx);
+    cc20_crypt(outbuf + TRANSOP_CC20_PREAMBLE_SIZE, inbuf, in_len, outbuf + (TRANSOP_CC20_PREAMBLE_SIZE - N2N_CC20_IVEC_SIZE), priv->ctx);
 
     return in_len + TRANSOP_CC20_PREAMBLE_SIZE;
 }
