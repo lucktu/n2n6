@@ -94,7 +94,7 @@ static ssize_t transop_decode_aes(n2n_trans_op_t *arg,
 
     decode_buf(iv_seed, TRANSOP_AES_IV_SEED_SIZE, inbuf, &rem, &idx);
     int len = in_len - TRANSOP_AES_PREAMBLE_SIZE;
-    if (len % N2N_AES_BLOCK_SIZE != 0) return 0;
+    if (len < N2N_AES_BLOCK_SIZE || len % N2N_AES_BLOCK_SIZE != 0) return 0;
 
     n2n_aes_ivec_t dec_ivec = {0};
     set_aes_cbc_iv(priv, dec_ivec, iv_seed);
