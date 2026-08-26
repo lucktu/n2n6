@@ -6336,55 +6336,57 @@ static int run_loop(n2n_edge_t * eee )
                                                eee->device.ip_addr, eee->device.mac_addr);
             for (int _pi = 0; _pi < n; _pi++) {
                 uint8_t *frame = probe_buf + _pi * 19;
-                /* Look up peer to get its P2P UDP address */
-                uint32_t p_virt_ip = 0;
-                for (int _bi = 0; _bi < BYPASS_MAX_PEERS; _bi++) {
-                    if (eee->bp->peers[_bi].state == BYPASS_PEER_PROBING &&
-                        eee->bp->peers[_bi].virt_ip != 0) {
-                        p_virt_ip = eee->bp->peers[_bi].virt_ip;
+                /* Find the peer matching this probe frame's destination MAC
+                 * (frame[0..5] was set by bypass_get_pending_probes).  The
+                 * old code searched for the first PROBING peer, which always
+                 * returned the same peer for every frame — breaking bypass
+                 * negotiation when multiple peers were being probed. */
+                n2n_mac_t dst_mac;
+                memcpy(dst_mac, frame, N2N_MAC_SIZE);
+                struct peer_info *pi = NULL;
+                for (struct peer_info *_scan = eee->known_peers; _scan; _scan = _scan->next) {
+                    if (memcmp(_scan->mac_addr, dst_mac, N2N_MAC_SIZE) == 0) {
+                        pi = _scan;
                         break;
                     }
                 }
-                if (p_virt_ip != 0) {
-                    struct peer_info *pi = bypass_find_peer_info(eee, p_virt_ip);
-                    if (pi) {
-                        n2n_sock_t p2p_dest;
-                        int have_p2p = 0;
-                        if (pi->sock.family == AF_INET && eee->udp_sock != -1) {
-                            p2p_dest = pi->sock; have_p2p = 1;
-                        } else if (pi->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
-                            p2p_dest = pi->sock6; have_p2p = 1;
-                        }
-                        if (have_p2p) {
-                            /* Build encrypted n2n PACKET */
-                            n2n_mac_t destMac;
-                            uint8_t pktbuf[N2N_PKT_BUF_SIZE];
-                            size_t idx = 0;
-                            n2n_common_t cmn;
-                            n2n_PACKET_t pkt;
-                            size_t tx_transop_idx = edge_choose_tx_transop(eee);
-                            memcpy(destMac, frame, N2N_MAC_SIZE);
-                            memset(&cmn, 0, sizeof(cmn));
-                            cmn.ttl = N2N_DEFAULT_TTL;
-                            cmn.pc = n2n_packet;
-                            cmn.flags = 0;
-                            memcpy(cmn.community, eee->community_name, N2N_COMMUNITY_SIZE);
-                            memset(&pkt, 0, sizeof(pkt));
-                            memcpy(pkt.srcMac, eee->device.mac_addr, N2N_MAC_SIZE);
-                            memcpy(pkt.dstMac, destMac, N2N_MAC_SIZE);
-                            pkt.sock.family = 0;
-                            pkt.transform = eee->transop[tx_transop_idx].transform_id;
-                            encode_PACKET(pktbuf, &idx, &cmn, &pkt);
-                            idx += eee->transop[tx_transop_idx].fwd(
-                                &(eee->transop[tx_transop_idx]),
-                                pktbuf+idx, N2N_PKT_BUF_SIZE-idx,
-                                frame, 19, destMac);
-                            ++(eee->transop[tx_transop_idx].tx_cnt);
-                            /* Send directly to peer's P2P address */
-                            sendto_sock(sock_for_dest(eee, &p2p_dest),
-                                        pktbuf, idx, &p2p_dest);
-                            continue;
-                        }
+                if (pi) {
+                    n2n_sock_t p2p_dest;
+                    int have_p2p = 0;
+                    if (pi->sock.family == AF_INET && eee->udp_sock != -1) {
+                        p2p_dest = pi->sock; have_p2p = 1;
+                    } else if (pi->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
+                        p2p_dest = pi->sock6; have_p2p = 1;
+                    }
+                    if (have_p2p) {
+                        /* Build encrypted n2n PACKET */
+                        n2n_mac_t destMac;
+                        uint8_t pktbuf[N2N_PKT_BUF_SIZE];
+                        size_t idx = 0;
+                        n2n_common_t cmn;
+                        n2n_PACKET_t pkt;
+                        size_t tx_transop_idx = edge_choose_tx_transop(eee);
+                        memcpy(destMac, frame, N2N_MAC_SIZE);
+                        memset(&cmn, 0, sizeof(cmn));
+                        cmn.ttl = N2N_DEFAULT_TTL;
+                        cmn.pc = n2n_packet;
+                        cmn.flags = 0;
+                        memcpy(cmn.community, eee->community_name, N2N_COMMUNITY_SIZE);
+                        memset(&pkt, 0, sizeof(pkt));
+                        memcpy(pkt.srcMac, eee->device.mac_addr, N2N_MAC_SIZE);
+                        memcpy(pkt.dstMac, destMac, N2N_MAC_SIZE);
+                        pkt.sock.family = 0;
+                        pkt.transform = eee->transop[tx_transop_idx].transform_id;
+                        encode_PACKET(pktbuf, &idx, &cmn, &pkt);
+                        idx += eee->transop[tx_transop_idx].fwd(
+                            &(eee->transop[tx_transop_idx]),
+                            pktbuf+idx, N2N_PKT_BUF_SIZE-idx,
+                            frame, 19, destMac);
+                        ++(eee->transop[tx_transop_idx].tx_cnt);
+                        /* Send directly to peer's P2P address */
+                        sendto_sock(sock_for_dest(eee, &p2p_dest),
+                                    pktbuf, idx, &p2p_dest);
+                        continue;
                     }
                 }
                 /* Fallback: normal path */
