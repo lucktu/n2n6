@@ -746,11 +746,15 @@ ssize_t ws_recv(ws_conn_t *c, void *out, size_t outlen) {
                     ws_close(c);
                     return -1;
                 }
-                size_t copy = (payload_len < outlen) ? payload_len : outlen;
-                memcpy(out, payload, copy);
+                if (payload_len > outlen) {
+                    /* Caller's buffer too small for this frame — protocol error */
+                    ws_close(c);
+                    return -1;
+                }
+                memcpy(out, payload, payload_len);
                 ws_consume(c, need);
                 c->last_seen = time(NULL);
-                return (ssize_t)copy;
+                return (ssize_t)payload_len;
             }
         }
 
