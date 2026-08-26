@@ -155,15 +155,24 @@ static int bypass_kcp_drain(bypass_context_t *ctx, struct bypass_conn *c)
                 }
                 break;
             }
-        } else if (sent < 0 && (BYPASS_ERRNO() == BYPASS_EAGAIN || BYPASS_ERRNO() == BYPASS_EWOULDBLOCK)) {
+        } else if (sent == 0) {
+            /* send() returned 0 (rare on TCP, but possible).  Data was
+             * already removed from KCP; cache it for retry to avoid loss. */
             if (c->tx_buf_len + (size_t)ret <= BYPASS_TX_BUF_SIZE) {
                 memcpy(c->tx_buf + c->tx_buf_len, c->agg_buf, (size_t)ret);
                 c->tx_buf_len += (size_t)ret;
             }
             break;
-        }
-        if (sent <= 0 && (sent == 0 || (BYPASS_ERRNO() != BYPASS_EAGAIN && BYPASS_ERRNO() != BYPASS_EWOULDBLOCK)))
+        } else if (BYPASS_ERRNO() == BYPASS_EAGAIN || BYPASS_ERRNO() == BYPASS_EWOULDBLOCK) {
+            if (c->tx_buf_len + (size_t)ret <= BYPASS_TX_BUF_SIZE) {
+                memcpy(c->tx_buf + c->tx_buf_len, c->agg_buf, (size_t)ret);
+                c->tx_buf_len += (size_t)ret;
+            }
             break;
+        } else {
+            /* Permanent error — drop silently */
+            break;
+        }
     }
     /* Tell KCP to send window update if we drained data */
     if (drained && c->kcp)
