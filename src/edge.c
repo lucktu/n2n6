@@ -5699,7 +5699,17 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
 
     while (supernode2addr(&(eee.supernode), eee.sn_af, eee.sn_ip_array[eee.sn_idx]) != 0) {
         if (!g_edge_running) break;
-        traceEvent(TRACE_WARNING, "Failed to resolve supernode, retrying in 5 seconds...");
+
+        if (eee.sn_num > 1) {
+            /* Try the next configured supernode first before sleeping */
+            traceEvent(TRACE_WARNING, "Failed to resolve supernode %s, trying next (%u of %u)...",
+                       eee.sn_ip_array[eee.sn_idx],
+                       (unsigned int)(eee.sn_idx + 1), (unsigned int)eee.sn_num);
+            eee.sn_idx = (eee.sn_idx + 1) % eee.sn_num;
+        } else {
+            traceEvent(TRACE_WARNING, "Failed to resolve supernode, retrying in 5 seconds...");
+        }
+
 #ifdef _WIN32
         Sleep(5000);
 #else
