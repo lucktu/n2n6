@@ -26,7 +26,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -98,13 +97,18 @@ static void ws_set_keepalive(SOCKET fd) {
 #endif
 }
 
-/* Blocking send of all bytes (loop until done or error). Socket is in blocking mode.
+/* Send all bytes, blocking until done or the send timeout expires.
+ * Socket is blocking with SO_SNDTIMEO=3s (set on the data phase in
+ * ws_connect / ws_server_accept): the kernel
+ * makes room for a temporarily full TCP window within the window (smooth
+ * throttling, no queue churn — this is what gives full-speed throughput in
+ * both good and bad networks); a peer that truly never reads triggers
+ * EAGAIN after 3s and we return -2 so the caller can drop the frame instead
+ * of freezing the main loop.
  * Return values:
  *    0  = all sent successfully
  *   -1  = connection dead (send returned 0 peer closed, or EPIPE/ECONNRESET fatal error)
- *   -2  = temporary failure (EAGAIN/EWOULDBLOCK/SO_SNDTIMEO timeout, TCP buffer full)
- *         Caller should not close the connection, just drop the current packet;
- *         can continue on next select readable. */
+ *   -2  = send timed out (peer not reading) — some bytes may be unsent */
 static int ws_send_all(SOCKET fd, const uint8_t *buf, size_t len) {
     size_t s = 0;
     while (s < len) {
@@ -114,11 +118,19 @@ static int ws_send_all(SOCKET fd, const uint8_t *buf, size_t len) {
         int err = WS_ERRNO();
         if (err == WS_EINTR) continue;
         if (err == WS_EAGAIN || err == WS_ETIMEOUT)
-            return -2;  /* Temporary: TCP buffer full, don't close connection */
+            return -2;  /* SO_SNDTIMEO fired — peer not reading */
         return -1;      /* EPIPE/ECONNRESET etc.: connection dead */
     }
     return 0;
 }
+/* NOTE for future work (fairness, many WS conns on ONE supernode):
+ * ws_send_all blocks up to 3s when the peer's TCP window is full. On the
+ * single-threaded SN main loop this means ONE stalled WS peer can delay all
+ * other concurrent WS conns for up to 3s per forwarded frame. Fine for the
+ * typical 1-edge-per-SN setup (stalled peers are purged after 60s by
+ * sn_ws_purge). If a deployment needs dozens of WS edges with poor links,
+ * replace this blocking send with a truly non-blocking per-conn TX queue
+ * driven by select writable events — see sn.c main-loop WS handling. */
 
 /* Blocking read of HTTP header (until "\r\n\r\n"), store in buf (null-terminated).
  * Returns total bytes read (including possible pre-read WS frame data at the end),
@@ -481,13 +493,14 @@ int ws_connect(ws_conn_t *c, const char *host, const char *host_header, uint16_t
         return -1;
     }
 
-    /* Data phase: receive timeout 2s, send timeout 50ms (drop packet when buffer full,
-     * don't block main loop) */
+    /* Data phase: receive timeout 2s; send timeout 3s — ws_send_all blocks but
+     * bounded: a full TCP window makes room (smooth throttling), a dead peer
+     * triggers EAGAIN after 3s so the main loop never freezes. */
     {
         struct timeval tv;
         tv.tv_sec = 2; tv.tv_usec = 0;
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-        tv.tv_sec = 0; tv.tv_usec = 50000;
+        tv.tv_sec = 3; tv.tv_usec = 0;
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
     }
     /* TCP keepalive + TCP_NODELAY */
@@ -519,12 +532,12 @@ int ws_server_accept(ws_conn_t *c, SOCKET listen_fd) {
         return -1;
     }
 
-    /* Data phase: receive timeout 2s, send timeout 50ms (same as ws_connect) + keepalive */
+    /* Data phase: receive timeout 2s; send timeout 3s (same as ws_connect) + keepalive */
     {
         struct timeval tv;
         tv.tv_sec = 2; tv.tv_usec = 0;
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-        tv.tv_sec = 0; tv.tv_usec = 50000;
+        tv.tv_sec = 3; tv.tv_usec = 0;
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
     }
     ws_set_keepalive(fd);
@@ -535,62 +548,15 @@ int ws_server_accept(ws_conn_t *c, SOCKET listen_fd) {
 }
 
 
-/* Send a control frame (pong/close), payload <= 125 */
-static int ws_send_control(ws_conn_t *c, uint8_t opcode,
-                           const uint8_t *payload, size_t len) {
-    uint8_t hdr[6];
-    size_t hlen = 2;
-    int mask = c->is_client;
-    uint8_t mk[4];
+/* ---- WS framing ---- */
 
-    if (len > 125) len = 125;
-    hdr[0] = 0x80 | opcode;  /* FIN + opcode */
-    if (mask) {
-        random_bytes(NULL, mk, 4);
-        hdr[1] = (uint8_t)(0x80 | len);
-        memcpy(hdr + 2, mk, 4);
-        hlen = 6;
-    } else {
-        hdr[1] = (uint8_t)len;
-    }
-    {
-        int sr = ws_send_all(c->fd, hdr, hlen);
-        if (sr < 0) return (sr == -1) ? -1 : -2;  /* -1=dead, -2=EAGAIN pass-through */
-    }
-    if (len) {
-        uint8_t buf[125];
-        size_t i;
-        int sr;
-        memcpy(buf, payload, len);
-        if (mask) for (i = 0; i < len; i++) buf[i] ^= mk[i & 3];
-        sr = ws_send_all(c->fd, buf, len);
-        if (sr < 0) return (sr == -1) ? -1 : -2;
-    }
-    return 0;
-}
-
-/* Send ping control frame (application-level heartbeat, prevent NAT timeout).
- * Returns: 0=success, -1=connection dead, -2=temporary EAGAIN(caller should not close connection). */
-int ws_ping(ws_conn_t *c) {
-    if (c->state != WS_OPEN || c->fd < 0) return -1;
-    return ws_send_control(c, 0x9, NULL, 0);
-}
-
-
-ssize_t ws_send(ws_conn_t *c, const void *payload, size_t len) {
-    uint8_t hdr[14];
-    size_t hlen = 0;
-    int mask = c->is_client;
-    uint8_t mk[4];
-    uint8_t buf[N2N_PKT_BUF_SIZE];
-    size_t outlen;
-
-    if (c->state != WS_OPEN || c->fd < 0) return -1;
-    if (len > sizeof(buf)) return -1;  /* n2n packet should not exceed N2N_PKT_BUF_SIZE */
-
-    hdr[0] = 0x82;  /* FIN + binary opcode */
+/* Build one binary data frame (0x82 FIN+opcode) into hdr, mask key into mk.
+ * Returns the frame header length (2/6/10); the caller then writes the
+ * payload (masked) right after the header. Client (mask=1) sends a random
+ * 4-byte key and sets the mask bit; server (mask=0) sends unmasked. */
+static size_t ws_build_frame(uint8_t *hdr, uint8_t mk[4], size_t len, int mask) {
+    size_t hlen;
     if (mask) random_bytes(NULL, mk, 4);
-
     if (len <= 125) {
         hdr[1] = (uint8_t)((mask ? 0x80 : 0) | len);
         hlen = 2;
@@ -608,30 +574,71 @@ ssize_t ws_send(ws_conn_t *c, const void *payload, size_t len) {
         hdr[9] = (uint8_t)len;
         hlen = 10;
     }
+    hdr[0] = 0x82;  /* FIN + binary opcode */
     if (mask) { memcpy(hdr + hlen, mk, 4); hlen += 4; }
+    return hlen;
+}
 
-    /* Send frame header first.
-     * ws_send_all: -1=connection dead(close connection), -2=temporary EAGAIN(don't close,
-     * drop this packet) */
+/* ---- Control frames ---- */
+
+/* Send a control frame (pong/close), payload <= 125.
+ * Best-effort: pings/pongs are tiny and pathological-buffer-full is harmless
+ * to drop (the peer's liveness check uses last_seen on data/pong, and the
+ * next 30s ping will verify). Returns 0=queued/sent, -1=dead (close). */
+static int ws_send_control(ws_conn_t *c, uint8_t opcode,
+                           const uint8_t *payload, size_t len) {
+    uint8_t hdr[10];
+    size_t hlen;
+    int mask = c->is_client;
+    uint8_t mk[4];
+
+    if (len > 125) len = 125;
+    hlen = ws_build_frame(hdr, mk, len, mask);
+    hdr[1] = (uint8_t)((hdr[1] & 0x7f) | (mask ? 0x80 : 0));
+    hdr[0] = 0x80 | opcode;  /* FIN + control opcode */
     {
         int sr = ws_send_all(c->fd, hdr, hlen);
-        if (sr < 0) {
-            if (sr == -1) ws_close(c);
-            return -1;
-        }
+        if (sr < 0) return (sr == -1) ? -1 : 0;  /* timeout: drop ping, keep conn */
     }
-
-    /* Then send payload (client must mask) */
     if (len) {
+        uint8_t buf[125];
         size_t i;
         int sr;
-        outlen = len;
         memcpy(buf, payload, len);
         if (mask) for (i = 0; i < len; i++) buf[i] ^= mk[i & 3];
-        sr = ws_send_all(c->fd, buf, outlen);
+        sr = ws_send_all(c->fd, buf, len);
+        if (sr < 0) return (sr == -1) ? -1 : 0;
+    }
+    return 0;
+}
+
+/* Send ping control frame (application-level heartbeat, prevent NAT timeout).
+ * Returns: 0=success, -1=connection dead (should close). */
+int ws_ping(ws_conn_t *c) {
+    if (c->state != WS_OPEN || c->fd < 0) return -1;
+    return ws_send_control(c, 0x9, NULL, 0);
+}
+
+
+ssize_t ws_send(ws_conn_t *c, const void *payload, size_t len) {
+    int mask = c->is_client;
+    uint8_t mk[4];
+    int sr;
+
+    if (c->state != WS_OPEN || c->fd < 0) return -1;
+    if (len > N2N_PKT_BUF_SIZE) return -1;  /* n2n packet should not exceed N2N_PKT_BUF_SIZE */
+
+    {
+        uint8_t buf[N2N_PKT_BUF_SIZE + 14];
+        size_t hlen = ws_build_frame(buf, mk, len, mask);
+        size_t i;
+        memcpy(buf + hlen, payload, len);
+        if (mask) for (i = 0; i < len; i++) buf[hlen + i] ^= mk[i & 3];
+
+        sr = ws_send_all(c->fd, buf, hlen + len);
         if (sr < 0) {
-            if (sr == -1) ws_close(c);
-            return -1;
+            if (sr == -1) { ws_close(c); return -1; }
+            return -2;  /* timeout (-2): peer not reading — drop frame */
         }
     }
 

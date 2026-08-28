@@ -6109,17 +6109,18 @@ static int run_loop(n2n_edge_t * eee )
         max_sock = max( (int) max_sock, (int) eee->device.fd );
 #endif
 
-        /* WS mode: add WebSocket connection fd to select */
+        /* Add bypass proxy and connection sockets to select */
+        fd_set bypass_write_mask;
+        int bypass_active = bypass_has_peers(eee->bp);
+        FD_ZERO(&bypass_write_mask);
+
+        /* WS mode: add the WebSocket connection fd to select (reads only) */
         if (eee->use_ws && eee->ws_conn.state == WS_OPEN && eee->ws_conn.fd >= 0) {
             FD_SET(eee->ws_conn.fd, &socket_mask);
             max_sock = max(max_sock, (int)eee->ws_conn.fd);
         }
 
-        /* Add bypass proxy and connection sockets to select */
-        fd_set bypass_write_mask;
-        int bypass_active = bypass_has_peers(eee->bp);
         if (bypass_active) {
-            FD_ZERO(&bypass_write_mask);
             if (eee->bp->proxy_sock >= 0) {
                 FD_SET(eee->bp->proxy_sock, &socket_mask);
                 max_sock = max(max_sock, eee->bp->proxy_sock);
@@ -6323,11 +6324,16 @@ static int run_loop(n2n_edge_t * eee )
                 }
             }
 
-            /* WS mode: handle WebSocket fd read */
+            /* WS mode: handle WebSocket fd read — drain like the UDP loop
+             * (128 cap) because ws_recv decodes ONE frame per call;
+             * a single recv per select tick caps WS throughput at ~1 Mbps. */
             if (eee->use_ws && eee->ws_conn.state == WS_OPEN &&
                 eee->ws_conn.fd >= 0 &&
                 FD_ISSET(eee->ws_conn.fd, &socket_mask)) {
-                readFromIPSocket(eee, eee->ws_conn.fd);
+                for (int _wi = 0; _wi < 128; _wi++) {
+                    if (readFromIPSocket(eee, eee->ws_conn.fd) == 0)
+                        break;
+                }
             }
 
             if(eee->mgmt_sock != -1 && FD_ISSET(eee->mgmt_sock, &socket_mask))
@@ -6356,6 +6362,10 @@ static int run_loop(n2n_edge_t * eee )
                     }
                 }
             }
+
+            /* WS mode: reads are handled above with the other socket reads.
+             * No writable flush is needed: ws_send sends directly (blocking,
+             * bounded by the 3s SO_SNDTIMEO) and drops the frame on timeout. */
 
 #ifndef _WIN32
             if(FD_ISSET(eee->device.fd, &socket_mask))

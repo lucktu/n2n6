@@ -38,7 +38,8 @@ typedef enum {
     WS_CLOSED       /* Closed */
 } ws_state_t;
 
-/* Receive frame buffer: single n2n packet max N2N_PKT_BUF_SIZE(4096) + WS frame header max 14 bytes;
+/* Receive frame buffer: single n2n packet max N2N_PKT_BUF_SIZE(4096) + WS frame
+ * header max 14 bytes (10-byte header + 4-byte mask);
  * 8192 can hold 1 complete frame plus partial pre-read data of the next frame. */
 #define N2N_WS_RX_BUF_SIZE 8192
 
@@ -70,8 +71,9 @@ void    ws_init(ws_conn_t *c);
  *   host_header: hostname placed in the HTTP Host header (e.g. the original -l domain when
  *                connecting through a CDN / reverse proxy). NULL falls back to host.
  *   port: port (host byte order)
- * On success state=WS_OPEN, data phase uses blocking socket (read scheduled by select).
- * Connection timeout 5s, handshake timeout 5s. Returns 0 success, <0 failure. */
+ * On success state=WS_OPEN, data phase uses blocking socket with a 3s send
+ * timeout (reads scheduled by select). Connection timeout 5s, handshake
+ * timeout 5s. Returns 0 success, <0 failure. */
 int     ws_connect(ws_conn_t *c, const char *host, const char *host_header, uint16_t port);
 
 /* Server (sn): accept a new connection and complete WS handshake (synchronous).
@@ -80,12 +82,16 @@ int     ws_connect(ws_conn_t *c, const char *host, const char *host_header, uint
 int     ws_server_accept(ws_conn_t *c, SOCKET listen_fd);
 
 /* Send: wrap payload in a WS binary frame and transmit (client auto-masks).
- *   Returns total bytes sent (including frame header), <0 failure. */
+ *   Blocking send with a 3s bound (SO_SNDTIMEO, see ws_send_all in ws.c): a
+ *   full TCP window makes room within the window (smooth full-speed
+ *   throttling); a peer that stops reading hits the timeout and the frame is
+ *   dropped (-2) instead of freezing the caller. Returns: >0 payload length
+ *   sent; -1 connection dead; -2 send timed out (frame dropped). */
 ssize_t ws_send(ws_conn_t *c, const void *payload, size_t len);
 
 /* Send ping control frame (application-level heartbeat, prevent NAT timeout).
  *   Peer's ws_recv will auto-reply with pong upon receiving ping.
- *   Returns: 0=success, -1=connection dead(should close), -2=temporary EAGAIN(should not close connection). */
+ *   Returns: 0=success, -1=connection dead(should close). */
 int     ws_ping(ws_conn_t *c);
 
 /* Receive: read and decode a complete data frame from the connection.
