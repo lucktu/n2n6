@@ -1210,7 +1210,7 @@ void bypass_start_negotiation(bypass_context_t *ctx, struct peer_info *peer)
         return;
 
     /* Principle 10: wait at least 2 seconds after P2P establishment
-     * before starting bypass negotiation ("旁路只是备选项"). */
+     * before starting bypass negotiation (bypass is only a fallback). */
     if (n2n_now() - peer->p2p_est_time < 2)
         return;
 

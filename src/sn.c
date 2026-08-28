@@ -462,8 +462,9 @@ static void save_community_stats(n2n_sn_t *sss, time_t now)
                 s->min_idx, (int64_t)s->last_minute);
         for (int i = 0; i < COMM_STATS_DAYS; i++)
             fprintf(fp, "%" PRIu64 "%c", s->bytes_30d[i], i == COMM_STATS_DAYS-1 ? '\n' : ' ');
-        /* 24h 分钟桶：每行 240 个值，共 6 行。
-         * 必须持久化，否则重启后滑动窗口无法衰减，24h 限速会永久命中。 */
+        /* 24h minute buckets: 6 rows x 240 values each.
+         * Must be persisted, otherwise the sliding window cannot decay
+         * across restarts and the 24h rate limit would hit permanently. */
         for (int i = 0, c = 0; i < COMM_STATS_MINUTES; i++) {
             fprintf(fp, "%" PRIu64 "%c", s->bytes_1440[i], c == 239 ? '\n' : ' ');
             if (++c == 240) c = 0;
@@ -520,7 +521,7 @@ static void load_community_stats(n2n_sn_t *sss)
             p++;
         }
 
-        /* 24h 分钟桶：每行 240 个值，共 6 行 */
+        /* 24h minute buckets: 6 rows x 240 values each */
         int got = 0;
         char mline[6144];
         while (got < COMM_STATS_MINUTES) {
