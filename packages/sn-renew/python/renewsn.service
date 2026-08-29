@@ -1,0 +1,16 @@
+[Unit]
+Description=renewsn - n2n supernode DNS failover
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/renewsn.py
+Restart=always
+RestartSec=10
+User=nobody
+Group=nogroup
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
