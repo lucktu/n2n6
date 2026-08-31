@@ -86,6 +86,45 @@ log_error() {
 }
 
 # ============================================================
+# HTTP redirect resolution
+# ============================================================
+
+# Resolve HTTP redirect URL to host:port.
+# Uses wget to follow the redirect chain and extract the final target.
+# Works with both GNU wget and BusyBox wget.
+# Returns 0 on success, 1 on failure.
+resolve_http_redirect() {
+    url="$1"
+    timeout="$2"
+
+    output=$(wget -O /dev/null -T "$timeout" "$url" 2>&1) || true
+
+    # Get the last "Connecting to" line - this is the final redirect target
+    last_conn=$(echo "$output" | grep -i "Connecting to" | tail -1)
+    [ -z "$last_conn" ] && return 1
+
+    # Strip "Connecting to " prefix
+    addr="${last_conn#*Connecting to }"
+    addr="${addr#*connecting to }"
+
+    # BusyBox format: "host:port (IP:port)" → take first word
+    # GNU format: "host (IP)|:port..." → extract host and port separately
+    case "$addr" in
+        *\|*)  # GNU wget: "host (IP)|:port..."
+            host="${addr%% (*}"
+            port="${addr#*|:}"
+            port="${port%%...*}"
+            echo "$host:$port"
+            ;;
+        *)     # BusyBox: "host:port (...)"
+            addr="${addr%% *}"
+            echo "$addr"
+            ;;
+    esac
+    return 0
+}
+
+# ============================================================
 # SN probing
 # ============================================================
 
@@ -284,10 +323,12 @@ UDP_SKIP_WARNED=""  # one-shot flag, so a missing-tool warning is printed only o
 # Per-candidate consecutive failure counters (debounce), indexed by position
 # in CANDIDATES (1-based). Counter names are FAIL_CNT_<n> — simple digits,
 # because candidate strings like "host:port" are not valid shell identifiers.
+# Also store the resolved address for HTTP redirect candidates.
 idx=0
 for candidate in $CANDIDATES; do
     idx=$((idx + 1))
     eval "FAIL_CNT_$idx=0"
+    eval "RESOLVED_$idx='$candidate'"
 done
 NUM_CAND=$idx
 
@@ -301,8 +342,24 @@ while true; do
     idx=0
     for candidate in $CANDIDATES; do
         idx=$((idx + 1))
-        host="${candidate%%:*}"
-        port="${candidate##*:}"
+
+        # Resolve HTTP redirect candidates to actual host:port
+        case "$candidate" in
+            http://*|https://*)
+                resolved=$(resolve_http_redirect "$candidate" "$PROBE_TIMEOUT")
+                if [ -n "$resolved" ]; then
+                    eval "RESOLVED_$idx='$resolved'"
+                fi
+                eval "addr=\$RESOLVED_$idx"
+                host="${addr%%:*}"
+                port="${addr##*:}"
+                ;;
+            *)
+                host="${candidate%%:*}"
+                port="${candidate##*:}"
+                eval "RESOLVED_$idx='$candidate'"
+                ;;
+        esac
 
         # TCP probe (only when method=tcp or both)
         tcp_ok=1; udp_ok=1
@@ -350,7 +407,16 @@ while true; do
         if [ $alive -eq 1 ] && [ -z "$BEST_SN" ]; then
             # Ordering follows the candidate list: the first usable one wins
             # (primary-first, no latency preference).
-            BEST_SN="$candidate"
+            # HTTP redirect candidates are stored as-is, so edge resolves
+            # them dynamically via its built-in HTTP redirect parser.
+            case "$candidate" in
+                http://*|https://*)
+                    BEST_SN="$candidate"
+                    ;;
+                *)
+                    eval "BEST_SN=\$RESOLVED_$idx"
+                    ;;
+            esac
             BEST_LATENCY="0"
         fi
     done

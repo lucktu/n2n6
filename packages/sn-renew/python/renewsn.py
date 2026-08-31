@@ -18,10 +18,11 @@ import json
 import configparser
 import hashlib
 import threading
+import urllib.request
 from collections import deque
 from datetime import datetime
 from urllib.request import Request, urlopen
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 
 # ============================================================
 # Config
@@ -237,16 +238,69 @@ def update_txt(token, domain, sub_domain, value, ttl=60):
 class SnHealth:
     """Sliding window health evaluation for a single SN."""
 
-    def __init__(self, name, host, port, window_size=5):
+    def __init__(self, name, host, port, window_size=5, http_url=''):
         self.name = name
         self.host = host
         self.port = port
+        self.http_url = http_url  # non-empty if this is an HTTP redirect candidate
         self.window_size = window_size
-        self.results = deque(maxlen=window_size)  # True/False
+        self.results = deque(maxlen=window_size)
         self.latency = float('inf')
+
+    def _resolve_http(self, timeout=3):
+        """Resolve HTTP redirect URL to host:port via pure Python (no curl/wget)."""
+        import http.client
+        try:
+            url = self.http_url
+            if url.startswith('http://'):
+                url = url[7:]
+            path = '/'
+            if '/' in url:
+                host_part, path = url.split('/', 1)
+                path = '/' + path
+            else:
+                host_part = url
+            if ':' in host_part:
+                host, port_str = host_part.split(':')
+                port = int(port_str)
+            else:
+                host = host_part
+                port = 80
+
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+            conn.request('HEAD', path)
+            resp = conn.getresponse()
+            location = resp.getheader('Location')
+            conn.close()
+            if not location:
+                return False
+
+            loc = location.strip()
+            if loc.startswith('http://'):
+                loc = loc[7:]
+            if loc.startswith('https://'):
+                return False
+            if '/' in loc:
+                loc = loc.split('/')[0]
+            if ':' in loc:
+                host, port_str = loc.rsplit(':', 1)
+                try:
+                    self.host = host
+                    self.port = int(port_str)
+                    return True
+                except ValueError:
+                    pass
+            return False
+        except Exception:
+            return False
 
     def probe(self, method='both', community='', timeout=3):
         """Probe this SN. Returns True if alive."""
+        # Resolve HTTP redirect first if applicable
+        if self.http_url and not self._resolve_http(timeout):
+            self.results.append(False)
+            return False
+
         tcp_ok = False
         udp_ok = False
 
@@ -264,21 +318,16 @@ class SnHealth:
             alive = tcp_ok and udp_ok
 
         self.results.append(alive)
-
-        # Get latency
         self.latency = get_latency(self.host, self.port, timeout)
-
         return alive
 
     @property
     def health_percent(self):
-        """Health percentage based on sliding window."""
         if not self.results:
             return 0
         return sum(self.results) / len(self.results) * 100
 
     def is_healthy(self, threshold=50):
-        """Is the SN healthy based on health percentage threshold."""
         return self.health_percent >= threshold
 
 
@@ -303,14 +352,22 @@ def main():
     candidates = []
     for key in config.options('supernodes'):
         val = config.get('supernodes', key)
-        if ':' in val:
+        if val.startswith('http://') or val.startswith('https://'):
+            candidates.append({
+                'name': key,
+                'host': '',
+                'port': 0,
+                'http_url': val
+            })
+        elif ':' in val:
             host, port_str = val.rsplit(':', 1)
             try:
                 port = int(port_str)
                 candidates.append({
                     'name': key,
                     'host': host,
-                    'port': port
+                    'port': port,
+                    'http_url': ''
                 })
             except ValueError:
                 pass
@@ -321,7 +378,10 @@ def main():
 
     logging.info(f"Loaded {len(candidates)} candidate supernode(s):")
     for c in candidates:
-        logging.info(f"  {c['name']} = {c['host']}:{c['port']}")
+        if c['http_url']:
+            logging.info(f"  {c['name']} = {c['http_url']}")
+        else:
+            logging.info(f"  {c['name']} = {c['host']}:{c['port']}")
 
     # DNSPod config
     token = config.get('dnspod', 'token', fallback='')
@@ -335,7 +395,7 @@ def main():
     # Sliding window health evaluators
     health_map = {}
     for c in candidates:
-        health_map[c['name']] = SnHealth(c['name'], c['host'], c['port'], window_size)
+        health_map[c['name']] = SnHealth(c['name'], c['host'], c['port'], window_size, c['http_url'])
 
     # State
     last_dns_update = 0
@@ -354,7 +414,8 @@ def main():
                 health = health_map[c['name']]
                 alive = health.probe(probe_method, community, probe_timeout)
                 latency_str = f"{health.latency:.0f}ms" if health.latency != float('inf') else "N/A"
-                logging.debug(f"Probe {c['name']} ({c['host']}:{c['port']}): "
+                addr_str = c['http_url'] if c['http_url'] else f"{c['host']}:{c['port']}"
+                logging.debug(f"Probe {c['name']} ({addr_str}): "
                               f"{'ALIVE' if alive else 'DEAD'}, "
                               f"latency={latency_str}, health={health.health_percent:.0f}%")
 
@@ -375,9 +436,10 @@ def main():
                 continue
 
             best_health = health_map[best['name']]
-            best_addr = f"{best['host']}:{best['port']}"
+            best_addr = best['http_url'] if best['http_url'] else f"{best_health.host}:{best_health.port}"
+            best_label = f"{best_health.host}:{best_health.port}" if best['http_url'] else best_addr
 
-            logging.info(f"Best SN: {best['name']} ({best_addr}), "
+            logging.info(f"Best SN: {best['name']} ({best_label}), "
                          f"health={best_health.health_percent:.0f}%")
 
             # Check if DNS update is needed
