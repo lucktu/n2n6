@@ -493,6 +493,11 @@ struct n2n_edge
     n2n_sock_t          last_resolved_supernode;
     time_t              last_resolve_check;
 
+    /* HTTP redirect (pure socket, no curl/wget) */
+    char                http_redirect_url[N2N_EDGE_SN_HOST_SIZE];
+    time_t              last_http_check;
+    n2n_sock_t          last_http_supernode;
+
     /* "f" sync: lock mgmt input, take IP snapshot, compare vs PEER_INFO from SN */
     int                 peer_sync_active;     /* 1 = sync in progress, mgmt locked */
     time_t              peer_sync_time;       /* when sync started, for 2s timeout */
