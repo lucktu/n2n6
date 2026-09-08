@@ -700,6 +700,9 @@ struct n2n_sn
      * and each slot holds its own v4/v6 socket + last-seen timestamp. */
     n2n_brother_entry_t    brothers[MAX_BROTHER_SNS];
     SOCKET              mgmt_sock;      /* management socket. */
+    SOCKET              bounce_sock;    /* NAT bounce-test helper socket (random
+                                         * source port, outbound-only; replies
+                                         * "N2NB" to edges requesting a bounce). */
     SOCKET              ws_listen_sock; /* TCP listen socket for WebSocket (same as lport). */
 #define N2N_SN_MAX_WS 64
     ws_conn_t           ws_conns[N2N_SN_MAX_WS]; /* WS connection table (edge connected via WS). */
@@ -720,6 +723,12 @@ struct n2n_sn
     char                   backup_addr_text[256]; /* sn2 address (sn1 given via -b) */
     time_t                 last_brother_seen;
     n2n_mac_t              device_mac;       /* local NIC MAC used as SN identity in brother_reg */
+    /* Deferred full-cone probes: N2NF #1 fires on FCP arrival, #2/#3 are
+     * staggered so a re-mapped edge has already re-armed its stranger
+     * window (its own ACK wins the race against probe #1). */
+#define FC_PROBE_MAX 16
+#define FC_PROBE_SPREAD 2   /* seconds between the 3 sends */
+    struct { n2n_sock_t target; time_t due; uint8_t left; } fc_probes[FC_PROBE_MAX];
 };
 
 typedef struct n2n_sn n2n_sn_t;
@@ -960,6 +969,7 @@ static int update_edge( n2n_sn_t * sss,
                         time_t now,
                         const char * version,
                         const char * os_name,
+                        uint8_t nat_type,
                         uint8_t request_ip,
                         uint32_t requested_ip );
 
@@ -991,6 +1001,7 @@ static int init_sn( n2n_sn_t * sss )
     sss->sock = -1;
     sss->sock6 = -1;
     sss->mgmt_sock = -1;
+    sss->bounce_sock = -1;
     sss->ws_listen_sock = -1;
     {
         int wi;
@@ -1042,6 +1053,12 @@ static void deinit_sn( n2n_sn_t * sss )
     }
     sss->mgmt_sock = -1;
 
+    if ( sss->bounce_sock >= 0 )
+    {
+        closesocket(sss->bounce_sock);
+    }
+    sss->bounce_sock = -1;
+
     if ( sss->ws_listen_sock >= 0 )
     {
         closesocket(sss->ws_listen_sock);
@@ -1066,7 +1083,7 @@ static void deinit_sn( n2n_sn_t * sss )
 /* Mgmt table header, shared by the brother and edges tables so the column
  * positions (e.g. the trailing "os" column) stay in sync. */
 static const char mgmt_header[] =
-    "  id  mac                n2n_ip           wan_ip               <KB/s     GB/24h   GB/30d>  ver      os\n";
+    "  id  mac                n2n_ip           wan_ip               <KB/s     GB/24h   GB/30d>  ver      os       nat\n";
 
 /* brother_list display helper: format brother SN status lines (for -Q / trace). */
 static size_t brother_list_format(n2n_sn_t *sss, time_t now, char *buf, size_t bufsz)
@@ -1142,12 +1159,14 @@ static int update_edge( n2n_sn_t * sss,
                         time_t now,
                         const char * version,
                         const char * os_name,
+                        uint8_t nat_type,
                         uint8_t request_ip,
                         uint32_t requested_ip )
 {
     macstr_t            mac_buf;
     n2n_sock_str_t      sockbuf;
     struct peer_info *  scan;
+    uint8_t             nat_changed = 0; /* reported NAT type differs from stored */
 
     traceEvent( TRACE_DEBUG, "update_edge for %s %s",
                 macaddr_str( mac_buf, edgeMac ),
@@ -1315,6 +1334,7 @@ static int update_edge( n2n_sn_t * sss,
         } else {
             strcpy(scan->os_name, "unknown");
         }
+        scan->nat_type = nat_type;
 
         /* insert this guy at the head of the edges list */
         scan->next = sss->edges;
@@ -1355,6 +1375,29 @@ static int update_edge( n2n_sn_t * sss,
     else
     {
         /* Known */
+
+        /* Refresh identity/metadata on every registration regardless of
+         * address changes. Repeat registrations carry a stable IP:port
+         * (the edge socket does not move), so the addr_changed guard below
+         * would otherwise skip this block and a NAT type learned later
+         * (after the first, NAT-less registration) would never land on
+         * this edge. */
+        if (version) {
+            strncpy(scan->version, version, sizeof(scan->version) - 1);
+            scan->version[sizeof(scan->version) - 1] = '\0';
+        }
+        if (os_name) {
+            strncpy(scan->os_name, os_name, sizeof(scan->os_name) - 1);
+            scan->os_name[sizeof(scan->os_name) - 1] = '\0';
+        }
+        if (nat_type) {
+            if (nat_type != scan->nat_type ||
+                (now - scan->last_nat_push) >= 300) { /* re-push same value every 5 min: heals a lost PEER_INFO */
+                nat_changed = 1;
+                scan->last_nat_push = now;
+            }
+            scan->nat_type = nat_type;
+        }
 
         /* Update assigned IP if edge requests a different valid IP */
         if (request_ip && requested_ip != 0) {
@@ -1462,15 +1505,6 @@ static int update_edge( n2n_sn_t * sss,
                 scan->same_lan_as_sn = 1;
             }
 
-            if (version) {
-                strncpy(scan->version, version, sizeof(scan->version) - 1);
-                scan->version[sizeof(scan->version) - 1] = '\0';
-            }
-            if (os_name) {
-                strncpy(scan->os_name, os_name, sizeof(scan->os_name) - 1);
-                scan->os_name[sizeof(scan->os_name) - 1] = '\0';
-            }
-
             traceEvent( TRACE_INFO, "update_edge updated   %s ==> %s",
                         macaddr_str( mac_buf, edgeMac ),
                         sock_to_cstr( sockbuf, sender_sock ) );
@@ -1502,7 +1536,8 @@ static int update_edge( n2n_sn_t * sss,
     }
 
     scan->last_seen = now;
-    return 0;  /* unchanged, no push needed */
+    return nat_changed ? 2 : 0;  /* 2 = unchanged address but NAT type changed:
+                                     peers need a fresh PEER_INFO push */
 }
 
 
@@ -1878,7 +1913,7 @@ static int process_mgmt( n2n_sn_t * sss,
     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s", mgmt_header);
 	if (ressize < N2N_SN_PKTBUF_SIZE)
         ressize += snprintf(resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize,
-                           "---v2.3----------------------------------------------------------------------------------------------------\n");
+                           "---v2.3----------------------------------------------------------------------------------------------------------------\n");
     /* brother table sits between the two v2.3 separator lines */
     ressize += brother_list_format(sss, time(NULL), resbuf + ressize, N2N_SN_PKTBUF_SIZE - ressize);
 
@@ -2038,9 +2073,10 @@ static int process_mgmt( n2n_sn_t * sss,
                     }
                 }
                 ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                                   "  %2u  %-17s  %-15s  %-47s  %-7s  %s\n",
+                                   "  %2u  %-17s  %-15s  %-47s  %-7s  %-7s  %s\n",
                                    id++, macaddr_str(mac_buf, edge->mac_addr), virt_ip,
-                                   wan, version, os_name);
+                                   wan, version, os_name,
+                                   N2N_NAT_NAME(edge->nat_type));
             }
 
             r = sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
@@ -2128,7 +2164,7 @@ static int process_mgmt( n2n_sn_t * sss,
 
     /* Send footer and statistics */
     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
-                      "----------------------------------------------------------------------------------------------------v2.3---\n");
+                      "----------------------------------------------------------------------------------------------------------------v2.3---\n");
 
     time_t uptime = now - sss->start_time;
     int days = uptime / 86400;
@@ -2258,6 +2294,202 @@ static int try_broadcast( n2n_sn_t * sss,
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Full-cone probe (plan C): the edge's NAT filter whitelist is per
+ * mapping and starts empty. A source the edge has NEVER contacted can
+ * therefore only get through a full-cone NAT. When a brother SN forwards
+ * a brand-new edge mapping ("N2NF" + mac + IPv4 + port, 16 raw bytes),
+ * we fire 3 tiny "N2NF" datagrams at it from our main socket — by
+ * construction a never-contacted source. The edge accepts the probe only
+ * from its sn2 query channel IP and only before its first packet there. */
+
+/* Fire the probe at a forwarded edge mapping. Sender must match a live
+ * brother entry (IP level) so only the paired SN can trigger it. */
+static void handle_fc_probe_request( n2n_sn_t *sss,
+                                     const struct sockaddr *sender_sock,
+                                     const uint8_t *udp_buf,
+                                     time_t now )
+{
+    n2n_sock_str_t sockbuf;
+    n2n_sock_t sender_n2n;
+    n2n_sock_t target;
+    int from_brother = 0;
+    static const uint8_t msg[4] = { 'N', '2', 'N', 'F' };
+
+    if ( sss->last_brother_seen == 0 || now - sss->last_brother_seen > 180 )
+        return;
+
+    sock_from_sender( &sender_n2n, sender_sock );
+    if ( sender_n2n.family != AF_INET )
+        return;
+
+    {
+        uint8_t zero[6] = {0,0,0,0,0,0};
+        for ( int j = 0; j < MAX_BROTHER_SNS && !from_brother; j++ )
+        {
+            n2n_brother_entry_t *b = &sss->brothers[j];
+            if ( memcmp( b->mac, zero, 6 ) == 0 ) continue;
+            if ( b->sock.family == AF_INET &&
+                 memcmp( b->sock.addr.v4, sender_n2n.addr.v4, IPV4_SIZE ) == 0 )
+                from_brother = 1;
+        }
+    }
+    if ( !from_brother ) return;
+
+    memset( &target, 0, sizeof(target) );
+    target.family = AF_INET;
+    memcpy( target.addr.v4, udp_buf + 10, IPV4_SIZE );
+    target.port = ( (uint16_t)udp_buf[14] << 8 ) | udp_buf[15];
+    if ( is_private_ipv4( target.addr.v4 ) )
+        return; /* probes only cross a NAT; never send to private addresses */
+
+    /* #1 now; #2/#3 staggered (fc_probes, ticked by the main loop). On a
+     * re-mapped edge the ACK that re-arms its stranger window beats probe
+     * #1 — the later probes are the ones that land in the open window. */
+    sendto_sock( sss, &target, msg, sizeof(msg) );
+    for ( int i = 0; i < FC_PROBE_MAX; i++ )
+    {
+        if ( sss->fc_probes[i].left > 0 ) continue;
+        sss->fc_probes[i].target = target;
+        sss->fc_probes[i].due    = now + FC_PROBE_SPREAD;
+        sss->fc_probes[i].left   = 2;
+        break;
+    }
+
+    traceEvent( TRACE_INFO, "FC probe: N2NF x3 -> %s",
+                sock_to_cstr( sockbuf, &target ) );
+}
+
+/* Fire the staggered N2NF probes (#2/#3). The main loop wakes every 100ms,
+ * far finer than FC_PROBE_SPREAD. */
+static void fc_probes_tick( n2n_sn_t * sss, time_t now )
+{
+    static const uint8_t msg[4] = { 'N', '2', 'N', 'F' };
+
+    for ( int i = 0; i < FC_PROBE_MAX; i++ )
+    {
+        if ( sss->fc_probes[i].left == 0 || now < sss->fc_probes[i].due )
+            continue;
+        sendto_sock( sss, &sss->fc_probes[i].target, msg, sizeof(msg) );
+        sss->fc_probes[i].left--;
+        sss->fc_probes[i].due = now + FC_PROBE_SPREAD;
+    }
+}
+
+/* Forward a brand-new edge mapping to the brother SN(s) so THEY can act
+ * as the never-contacted source. Targets: live brothers[] entries first,
+ * fallback to the resolved -b address (asymmetric -b configs). */
+static void send_fc_probe_request( n2n_sn_t *sss,
+                                   const n2n_mac_t edgeMac,
+                                   const n2n_sock_t *edge_sock,
+                                   time_t now )
+{
+    uint8_t pkt[16];
+    int sent = 0;
+
+    if ( edge_sock->family != AF_INET ) return; /* NAT test is IPv4-only */
+
+    memcpy( pkt, "N2NF", 4 );
+    memcpy( pkt + 4, edgeMac, N2N_MAC_SIZE );
+    memcpy( pkt + 10, edge_sock->addr.v4, IPV4_SIZE );
+    pkt[14] = ( edge_sock->port >> 8 ) & 0xFF;
+    pkt[15] = edge_sock->port & 0xFF;
+
+    for ( int j = 0; j < MAX_BROTHER_SNS; j++ )
+    {
+        n2n_brother_entry_t *b = &sss->brothers[j];
+        time_t seen = b->seen > b->seen6 ? b->seen : b->seen6;
+        if ( b->sock.family == AF_INET && seen != 0 && now - seen <= 180 )
+        {
+            sendto_sock( sss, &b->sock, pkt, sizeof(pkt) );
+            sent = 1;
+        }
+    }
+    if ( !sent && sss->backup_addr_text[0] != '\0' )
+    {
+        n2n_sock_t bs;
+        if ( resolve_brother_addr( sss->backup_addr_text, &bs ) == 0 &&
+             bs.family == AF_INET )
+        {
+            sendto_sock( sss, &bs, pkt, sizeof(pkt) );
+            sent = 1;
+        }
+    }
+    if ( sent )
+    {
+        macstr_t mac_buf;
+        traceEvent( TRACE_DEBUG, "FC probe request forwarded for %s",
+                    macaddr_str( mac_buf, edgeMac ) );
+    }
+}
+
+/* push_nat_to_community: an edge's reported NAT type changed (update_edge
+ * returned 2) while its address stayed the same — nobody else would learn
+ * it (PEER_INFO pushes otherwise fire only on new/addr-changed edges).
+ * Send one PEER_INFO about the changed edge to every other community
+ * member so their mgmt "nat" column stays fresh. */
+static void push_nat_to_community( n2n_sn_t *sss,
+                                   struct peer_info *changed,
+                                   const n2n_community_t community )
+{
+    n2n_common_t    pi_cmn;
+    n2n_PEER_INFO_t pi;
+    uint8_t         pibuf[N2N_SN_PKTBUF_SIZE];
+    size_t          pix;
+    macstr_t        mac_buf;
+    struct peer_info *p;
+
+    if ( !changed ) return;
+
+    memset(&pi_cmn, 0, sizeof(pi_cmn));
+    memset(&pi, 0, sizeof(pi));
+    pi_cmn.ttl   = N2N_DEFAULT_TTL;
+    pi_cmn.pc    = n2n_peer_info;
+    pi_cmn.flags = N2N_FLAGS_FROM_SUPERNODE;
+    memcpy(pi_cmn.community, community, sizeof(n2n_community_t));
+
+    memcpy(pi.mac, changed->mac_addr, N2N_MAC_SIZE);
+    /* Always put IPv4 in sockets[0] if available */
+    if (changed->sock.family == AF_INET)
+        pi.sockets[0] = changed->sock;
+    else if (changed->sock6.family == AF_INET6)
+        pi.sockets[0] = changed->sock6;
+    if (changed->num_sockets > 1 &&
+        changed->sockets[1].family != 0 &&
+        changed->sockets[1].port != 0)
+    {
+        pi.aflags = N2N_AFLAGS_LOCAL_SOCKET;
+        pi.sockets[1] = changed->sockets[1];
+    } else {
+        pi.aflags = 0;
+    }
+    /* Include IPv6 address if available */
+    if (changed->sock6.family == AF_INET6) {
+        pi.aflags |= N2N_AFLAGS_IPV6_SOCKET;
+        pi.sock6 = changed->sock6;
+    } else {
+        memset(&pi.sock6, 0, sizeof(n2n_sock_t));
+    }
+    if (changed->same_lan_as_sn) {
+        pi.aflags |= N2N_AFLAGS_SAME_LAN_AS_SN;
+    }
+    strncpy(pi.version, changed->version, sizeof(pi.version) - 1);
+    strncpy(pi.os_name, changed->os_name, sizeof(pi.os_name) - 1);
+    pi.assigned_ip = changed->assigned_ip;
+    pi.aflags |= N2N_NAT_AFLAGS(changed->nat_type);
+    pix = 0;
+    encode_PEER_INFO(pibuf, &pix, &pi_cmn, &pi);
+
+    for ( p = sss->edges; p; p = p->next )
+    {
+        if ( p == changed ) continue;
+        if ( memcmp(p->community_name, community, sizeof(n2n_community_t)) != 0 ) continue;
+        sn_send_to_peer( sss, p, pibuf, pix );
+    }
+    traceEvent(TRACE_DEBUG, "pushed NAT change of %s to community",
+               macaddr_str(mac_buf, changed->mac_addr));
+}
+
 /** Examine a datagram and determine what to do with it.
  *
  */
@@ -2280,6 +2512,13 @@ static int process_udp( n2n_sn_t * sss,
 
 
     traceEvent( TRACE_DEBUG, "process_udp(%lu)", udp_size );
+
+    /* Full-cone probe request from a brother SN: 16 raw bytes, not n2n. */
+    if ( udp_size == 16 && memcmp( udp_buf, "N2NF", 4 ) == 0 )
+    {
+        handle_fc_probe_request( sss, sender_sock, udp_buf, now );
+        return 0;
+    }
 
     /* Use decode_common() to determine the kind of packet then process it:
      *
@@ -2816,6 +3055,8 @@ static int process_udp( n2n_sn_t * sss,
                 pi.os_name[sizeof(pi.os_name) - 1] = '\0';
             }
             pi.assigned_ip = target->assigned_ip;
+            /* Carry the peer's NAT type so edge mgmt can display it */
+            pi.aflags |= N2N_NAT_AFLAGS(target->nat_type);
 
             encode_PEER_INFO( encbuf, &encx, &cmn2, &pi );
             {
@@ -2871,6 +3112,7 @@ static int process_udp( n2n_sn_t * sss,
                     pi2.os_name[sizeof(pi2.os_name) - 1] = '\0';
                 }
                 pi2.assigned_ip = requester->assigned_ip;
+                pi2.aflags |= N2N_NAT_AFLAGS(requester->nat_type);
 
                 encode_PEER_INFO( encbuf2, &encx2, &cmn3, &pi2 );
                 /* Send to B via appropriate socket */
@@ -2897,6 +3139,19 @@ static int process_udp( n2n_sn_t * sss,
         /* Edge requesting registration with us.  */
 
         decode_REGISTER_SUPER( &reg, &cmn, udp_buf, &rem, &idx );
+
+        /* NAT bounce test: the edge asks us to reply from the helper socket
+         * (different source port) so it can tell restricted (IP-gated, any
+         * port allowed) from port-restricted NATs. Purely outbound, 4-byte
+         * magic, no state; sender's IP is re-checked by the edge. */
+        if ( (reg.aflags & N2N_AFLAGS_NAT_BOUNCE) &&
+             sender_sock->sa_family == AF_INET &&
+             sss->bounce_sock >= 0 )
+        {
+            static const uint8_t bmsg[4] = { 'N', '2', 'N', 'B' };
+            sendto( sss->bounce_sock, bmsg, sizeof(bmsg), 0,
+                    sender_sock, sender_sock_len );
+        }
 
         /* Brother SN detection: sn1 -> sn2 periodic registration, carries sn1's current address. */
         int is_brother_reg = (memcmp(cmn.community, "brother_reg", 11) == 0);
@@ -3205,7 +3460,21 @@ static int process_udp( n2n_sn_t * sss,
                      local_sock_ptr, local_sock_ena,
                      ((reg.aflags & N2N_AFLAGS_IPV6_SOCKET) && reg.own_ipv6.family == AF_INET6)
                          ? &reg.own_ipv6 : NULL,
-                     now, NULL, NULL, use_request_ip, use_requested_ip );
+                     now, NULL, NULL,
+                     N2N_NAT_FROM_AFLAGS(reg.aflags),
+                     use_request_ip, use_requested_ip );
+
+        /* NAT type changed with unchanged address (update_edge == 2):
+         * other edges would never learn it — push the fresh value. */
+        if ( is_new_edge == 2 )
+            push_nat_to_community( sss,
+                                   find_peer_by_mac(sss->edges, reg.edgeMac),
+                                   cmn.community );
+
+        /* Brand-new (or re-mapped) edge: one-shot chance for the brother SN
+         * to full-cone-probe it as a never-contacted source. */
+        if ( is_new_edge )
+            send_fc_probe_request( sss, reg.edgeMac, &(ack.sock), now );
 
         /* Set assigned IP in ACK */
         if (!query_only && use_request_ip) {
@@ -3288,6 +3557,7 @@ static int process_udp( n2n_sn_t * sss,
                     strncpy(pi.version, p->version, sizeof(pi.version) - 1);
                     strncpy(pi.os_name, p->os_name, sizeof(pi.os_name) - 1);
                     pi.assigned_ip = p->assigned_ip;
+                    pi.aflags |= N2N_NAT_AFLAGS(p->nat_type);
                     pix = 0;
                     encode_PEER_INFO(pibuf, &pix, &pi_cmn, &pi);
                     if (ws_sender) {
@@ -3497,6 +3767,13 @@ int main( int argc, char * const argv[] )
              * holding large per-socket memory pools. */
             { int snd = 256 * 1024;
               setsockopt(sss.sock, SOL_SOCKET, SO_SNDBUF, (const char*)&snd, sizeof(snd)); }
+            /* NAT bounce-test helper socket: random source port, no firewall
+             * inbound needed (the edge never connects to it; the sn only
+             * sends "N2NB" out and replies ride the conntrack entry). */
+            sss.bounce_sock = open_socket(0 /* any port */, 1 /*bind ANY*/ );
+            if (sss.bounce_sock == -1) {
+                traceEvent( TRACE_WARNING, "NAT bounce socket failed; bounce tests disabled" );
+            }
         } else {
             traceEvent( TRACE_WARNING, "IPv4 socket failed, continuing without IPv4" );
             sss.sock = -1;
@@ -3854,6 +4131,9 @@ static int run_loop( n2n_sn_t * sss )
                 traceEvent(TRACE_DEBUG, "Rate limit config reloaded");
             }
         }
+
+        /* Deferred full-cone N2NF probes (#2/#3, staggered). */
+        fc_probes_tick( sss, now );
 
         /* sn1 -> sn2 brother_reg, every 31s. */
         if (sss->backup_addr_text[0])

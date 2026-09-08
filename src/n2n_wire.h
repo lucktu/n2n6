@@ -166,6 +166,16 @@ typedef struct n2n_PACKET n2n_PACKET_t;
 
 /* Linked with n2n_register_super in n2n_pc_t. Only from edge to supernode. */
 #define N2N_AFLAGS_LOCAL_SOCKET   0x0001  /* local_sock field is valid */
+#define N2N_AFLAGS_NAT_CONE       0x0020  /* edge reports cone NAT (dual-sn reflection) */
+#define N2N_AFLAGS_NAT_SYMMETRIC  0x0040  /* edge reports symmetric NAT (dual-sn reflection) */
+#define N2N_AFLAGS_NAT_BOUNCE     0x0080  /* edge asks this sn for a NAT bounce test:
+                                             sn replies from an extra helper socket
+                                             (different source port, outbound-only)
+                                             with the 4-byte magic "N2NB" */
+#define N2N_AFLAGS_NAT_FULL_CONE  0x0100  /* edge reports full-cone NAT
+                                             (reserved: needs a never-contacted 3rd IP) */
+#define N2N_AFLAGS_NAT_RESTRICTED 0x0200  /* edge reports address-restricted cone NAT */
+#define N2N_AFLAGS_NAT_PORT_RESTRICT 0x0400 /* edge reports port-restricted NAT */
 #define N2N_AFLAGS_FORCE_PEER_INFO 0x0008  /* force supernode to push all peer info */
 #define N2N_AFLAGS_QUERY_ONLY     0x0010  /* REGISTER_SUPER is a one-shot query
                                              (e.g. ask sn2 for sn1's current address):

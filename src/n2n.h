@@ -221,6 +221,41 @@ typedef char ipstr_t[INET6_ADDRSTRLEN];
 #define N2N_MACSTR_SIZE 32
 typedef char macstr_t[N2N_MACSTR_SIZE];
 
+/* NAT type classification from dual-sn reflection (edge measures, sn displays).
+ * Dual-sn reflection compares the mappings toward two destinations:
+ * identical -> cone family, any difference -> symmetric. The sn bounce test
+ * (helper socket with a different source port) then splits the cone family:
+ * the bounce gets through on full-cone/address-restricted NATs and is
+ * dropped by port-restricted ones. Full cone cannot be told apart from
+ * address-restricted without a never-contacted third IP, so it reports
+ * as addr-restr. */
+#define N2N_NAT_UNKNOWN        0
+#define N2N_NAT_CONE           1
+#define N2N_NAT_SYMMETRIC      2
+#define N2N_NAT_FULL_CONE      3  /* reserved: needs a never-contacted 3rd IP */
+#define N2N_NAT_RESTRICTED     4  /* addr-restr: helper bounce got through (incl. full cone) */
+#define N2N_NAT_PORT_RESTRICT  5  /* no bounce despite requests */
+
+/* Shared display name for a N2N_NAT_* value ("unknown" when not measured). */
+#define N2N_NAT_NAME(t) ( (t) == N2N_NAT_CONE ? "cone" : \
+                          (t) == N2N_NAT_FULL_CONE ? "full-cone" : \
+                          (t) == N2N_NAT_RESTRICTED ? "addr-restr" : \
+                          (t) == N2N_NAT_PORT_RESTRICT ? "port-restr" : \
+                          (t) == N2N_NAT_SYMMETRIC ? "symmetric" : "unknown" )
+
+/* NAT type <-> aflags bits: REGISTER_SUPER carries the edge's own type,
+ * PEER_INFO carries a peer's type to edges for mgmt display. */
+#define N2N_NAT_AFLAGS(t) ( (t) == N2N_NAT_CONE ? N2N_AFLAGS_NAT_CONE : \
+                            (t) == N2N_NAT_FULL_CONE ? N2N_AFLAGS_NAT_FULL_CONE : \
+                            (t) == N2N_NAT_RESTRICTED ? N2N_AFLAGS_NAT_RESTRICTED : \
+                            (t) == N2N_NAT_PORT_RESTRICT ? N2N_AFLAGS_NAT_PORT_RESTRICT : \
+                            (t) == N2N_NAT_SYMMETRIC ? N2N_AFLAGS_NAT_SYMMETRIC : 0 )
+#define N2N_NAT_FROM_AFLAGS(a) ( ((a) & N2N_AFLAGS_NAT_RESTRICTED) ? N2N_NAT_RESTRICTED : \
+                                 ((a) & N2N_AFLAGS_NAT_PORT_RESTRICT) ? N2N_NAT_PORT_RESTRICT : \
+                                 ((a) & N2N_AFLAGS_NAT_FULL_CONE) ? N2N_NAT_FULL_CONE : \
+                                 ((a) & N2N_AFLAGS_NAT_SYMMETRIC) ? N2N_NAT_SYMMETRIC : \
+                                 ((a) & N2N_AFLAGS_NAT_CONE) ? N2N_NAT_CONE : N2N_NAT_UNKNOWN )
+
 struct peer_info {
     struct peer_info *  next;
     n2n_community_t     community_name;
@@ -229,6 +264,8 @@ struct peer_info {
     n2n_sock_t          sock6;             /* IPv6 public address (family=0 if unavailable) */
     int                 num_sockets;       /* 1=public only, 2=public+LAN */
     n2n_sock_t          sockets[2];        /* [0]=public (primary), [1]=LAN */
+    uint8_t             nat_type;          /* N2N_NAT_* as reported by the edge (0 if not reported) */
+    time_t              last_nat_push;     /* sn: last time this edge's nat_type was pushed to the community */
     uint8_t             connect_family;    /* AF_INET or AF_INET6 - how edge connected to supernode */
     time_t              last_seen;
     char                version[8];
@@ -509,6 +546,17 @@ struct n2n_edge
     time_t              start_time;
 
     n2n_sock_t          my_public_sock;
+
+    /* NAT type detection: dual-sn reflection (mapping compare) plus the sn
+     * bounce test (helper socket, different source port) for cone sub-types. */
+    uint8_t             nat_type;       /* N2N_NAT_* */
+    n2n_sock_t          nat_seen_sn1;   /* edge addr observed by sn1 (family=0 if none) */
+    n2n_sock_t          nat_seen_sn2;   /* edge addr observed by sn2 (family=0 if none) */
+    time_t              nat_probe_time; /* last periodic NAT probe tick */
+    uint8_t             nat_probe_pending; /* 1 while awaiting ACKs of the NAT probe */
+    uint8_t             nat_bounce_seen;   /* a public helper-port bounce arrived */
+    uint8_t             fc_seen;        /* "N2NF" from the never-contacted sn2 got through */
+    uint8_t             fc_window;      /* 1 until the first packet is sent to sn2 */
 
     n2n_sock_t          own_ipv6;       /* routable global IPv6 (GUA) of this edge,
                                            reported to supernode for IPv6 hole-punching
