@@ -252,11 +252,14 @@ typedef char macstr_t[N2N_MACSTR_SIZE];
                                  ((a) & N2N_AFLAGS_NAT_FULL_CONE) ? N2N_NAT_FULL_CONE : \
                                  ((a) & N2N_AFLAGS_NAT_SYMMETRIC) ? N2N_NAT_SYMMETRIC : N2N_NAT_UNKNOWN )
 
-/* NAT types eligible to act as the community relay R (mini-SN).
- * Phase 1: NAT1 only (N2N_NAT_FULL_CONE). NAT2 (addr-restr) is reserved:
- * extend this single macro when implemented, else the edge falls back to
- * SN relay. */
-#define N2N_NAT_RELAY_CAPABLE(t) ( (t) == N2N_NAT_FULL_CONE )
+/* NAT types eligible to act as the community relay peer (mini-SN):
+ * can the peer be reached without punching? Only a full-cone (NAT1) or a
+ * restricted-cone (NAT2) mapping -- any stricter kind (port-restricted,
+ * symmetric) falls back to the plain SN relay. This single macro is the
+ * SN's only relay-eligibility gate (the SN is the single authority deciding
+ * which peer is eligible to be the community relay). */
+#define N2N_NAT_RELAY_CAPABLE(t) ( (t) == N2N_NAT_FULL_CONE || \
+                                   (t) == N2N_NAT_RESTRICTED )
 
 struct peer_info {
     struct peer_info *  next;
@@ -293,8 +296,8 @@ struct peer_info {
     uint8_t             p2p_logged;        /* 1 if P2P direct message already printed for current state */
     uint8_t             p2p_is_lan;        /* 1=LAN P2P, set by edge.c at REGISTER_SUPER_ACK */
     uint8_t             same_lan_as_sn;    /* 1 if edge is in same LAN as supernode */
-    time_t              relay_adv_time;    /* sn: last time this edge was advertised relay R (throttle) */
-    uint8_t             relay_willing;     /* sn: edge's willingness to act as relay R: 0=no,1=default,2=yes */
+    time_t              relay_adv_time;    /* sn: last time this edge was advertised as the relay (throttle) */
+    uint8_t             relay_willing;     /* sn: edge's relay stance: 0=refuse,1=default,2=willing,3=force */
     /* Compact packet protocol support (version 0xE5 header) */
     uint8_t             compact_capable;   /* 1=understands compact format, 0=legacy/unknown */
     uint16_t            transform_id;      /* transform ID learned from PACKET headers (for SN legacy conversion) */
@@ -524,39 +527,43 @@ struct n2n_edge
     n2n_sock_t          cached_dst_sock;
     time_t              cached_dst_time;
 
-    /* R-RELAY client: community relay R (mini-SN). Set when SN advertises R
-     * (PEER_INFO with N2N_AFLAGS_RELAY). While active, the edge registers to R
-     * so R learns our socket, and packets whose direct path is not up are
-     * dual-sent to R and the supernode until a frame returns through R
-     * (relay_proven), then sent to R only. Cleared once a direct P2P link is
-     * established (no more relaying needed). */
+    /* Relay client: community relay peer (mini-SN). Set when SN advertises the
+     * relay (PEER_INFO with N2N_AFLAGS_RELAY). While active, the edge registers
+     * to it so it learns our socket, and packets whose direct path is not up
+     * are dual-sent to the relay and the supernode until a frame returns
+     * through the relay (relay_proven), then sent to the relay only. Cleared
+     * once a direct P2P link is established (no more relaying needed). */
     n2n_mac_t           relay_mac;
     n2n_sock_t          relay_sock;
     uint8_t             relay_valid;
     time_t              relay_last_reg;
-    time_t              relay_proven;   /* last time a frame was received THROUGH relay R; 0=never */
+    time_t              relay_proven;       /* last time a frame was received THROUGH the relay; 0=never */
+    time_t              relay_last_ack;     /* last time the relay answered our REGISTER (heartbeat ACK);
+                                               0 = never / not installed. Health signal, decoupled from
+                                               data traffic like the supernode failover logic */
 
-    /* R-RELAY server: when set, this edge acts as R and forwards PACKETs
-     * addressed to a peer that registered to it (mini-SN). Only a "good" peer
-     * (NAT1 + public address) self-enables this. NAT2 R is left for the
-     * "else -> back to SN" fallback and is not implemented. */
+    /* Relay server: when set, this edge acts as the relay and forwards
+     * PACKETs addressed to a peer that registered to it (mini-SN). Only a
+     * "good" peer (NAT1 + public address) self-enables this. NAT2 relays are
+     * left for the "else -> back to SN" fallback and are not implemented. */
     uint8_t             relay_mode;
 
-    /* R-RELAY server member table (mini-SN). Unlike known_peers/pending_peers
-     * (the P2P tables this edge punches on), R keeps a dedicated list of peers
-     * that registered to it for forwarding; these are reachable directly
-     * (NAT1) so their socket comes from the actual REGISTER transport source.
-     * This mirrors how the SN maintains its edge list, and is independent of
-     * P2P cleanup so the relay path survives peer-table churn. */
+    /* Relay server member table (mini-SN). Unlike known_peers/pending_peers
+     * (the P2P tables this edge punches on), the relay keeps a dedicated list
+     * of peers that registered to it for forwarding; these are reachable
+     * directly (NAT1) so their socket comes from the actual REGISTER transport
+     * source. This mirrors how the SN maintains its edge list, and is
+     * independent of P2P cleanup so the relay path survives peer-table churn. */
     struct peer_info *  relay_peers;
 
-    /* Relay client state: relay_proven is refreshed by any frame received
-     * THROUGH the relay; the RELAY_PROVEN_SECS window in check_relay then
-     * detects a dead relay and falls back to the supernode, retrying it every
-     * relay_probe_next period. */
+    /* Relay client state: relay_last_ack is refreshed by the relay's REGISTER_ACK
+     * (our 3s heartbeat) and drives liveness: no ACK for RELAY_ACK_SECS means
+     * the relay is dead and we fall back to the supernode, retrying it every
+     * relay_probe_next period. relay_proven tracks frames received THROUGH the
+     * relay and controls send-side single/dual sending. */
     time_t              relay_probe_next;       /* when to retry a dead relay */
     uint8_t             relay_giveup;           /* 1=relay deemed dead, stay on SN until retry */
-    uint8_t             relay_willing;          /* advertised to SN for relay selection: 0/1/2 */
+    uint8_t             relay_willing;          /* advertised to SN for relay selection: 0/1/2/3 */
 
     struct peer_info *  known_peers;
     struct peer_info *  pending_peers;
