@@ -390,6 +390,8 @@ static int edge_init(n2n_edge_t * eee)
     eee->nat_bounce_seen = 0;
     eee->fc_seen = 0;
     eee->fc_window = 1;
+    eee->fc_arm_time = 0; /* 0 arms the quick probe for 12s after start */
+    eee->nat_reprobe = 0;
     eee->sn_query_index = 1;
     eee->sn_backup_index = 1;
     eee->sn_af = AF_UNSPEC;
@@ -1422,6 +1424,15 @@ static void send_register_super( n2n_edge_t * eee,
         case N2N_NAT_RESTRICTED:    reg.aflags |= N2N_AFLAGS_NAT_RESTRICTED; break;
         case N2N_NAT_PORT_RESTRICT: reg.aflags |= N2N_AFLAGS_NAT_PORT_RESTRICT; break;
         case N2N_NAT_SYMMETRIC:     reg.aflags |= N2N_AFLAGS_NAT_SYMMETRIC; break;
+        }
+
+        /* One-shot manual NAT re-probe (mgmt "n"): ask the SN to re-trigger
+         * the brother's N2NF probe even though this registration is not a
+         * new/remapped edge. */
+        if ( eee->nat_reprobe )
+        {
+            reg.aflags |= N2N_AFLAGS_NAT_REPROBE;
+            eee->nat_reprobe = 0;
         }
     }
 
@@ -2874,20 +2885,28 @@ static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
         return;
     }
 
-    /* Phase 2.5: NAT type probe (normal mode only, every 5 min).
+    /* Phase 2.5: NAT type probe (normal mode).
      * One-shot QUERY_ONLY probe to the sn2 query channel so its ACK echoes
      * the NAT mapping observed from a second destination (nat_classify).
      * Skipped while failover/ask_backup is active (Phase 3 probes refresh
      * nat_seen_sn2 anyway) and when sn_query IS the current supernode
-     * (its registration ACK already provides the second observation). */
+     * (its registration ACK already provides the second observation).
+     * Two triggers share one action:
+     *   - quick: 12s after fc_arm_time (startup / remap re-arms it), so a
+     *     fresh stranger window still has its window open while sn2's
+     *     brother N2NF probes usually land within the first seconds;
+     *   - periodic: 300s safety net in case a quick probe got lost.
+     * The armed snapshot is consumed on fire (fc_arm_time = now) so an
+     * armed window probes exactly once, never on every loop tick. */
     if ( eee->sn_num >= 2 && !eee->use_ws && eee->sn_idx == 0 &&
          !eee->sn_ask_backup && !eee->sn_all_failed &&
          eee->sn_query.family != 0 &&
          sock_equal( &(eee->sn_query), &(eee->supernode) ) != 0 &&
-         nowTime > eee->start_time + 60 &&
-         nowTime > eee->nat_probe_time + 300 )
+         ( nowTime > eee->fc_arm_time + 12 ||
+           nowTime > eee->nat_probe_time + 300 ) )
     {
         eee->nat_probe_time = nowTime;
+        eee->fc_arm_time = nowTime; /* consume the quick-probe snapshot */
         eee->nat_probe_pending = 1;
         random_bytes( NULL, eee->sn_probe_cookie, N2N_COOKIE_SIZE );
         eee->sn_probe_cookie_valid = 1;
@@ -3999,6 +4018,7 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
                                 "  -       Decrease verbosity of logging\n"
                                 "  b       Toggle bypass on/off\n"
                                 "  f       Sync peers with supernode\n"
+                                "  n       Re-run NAT type detection\n"
                                 "  <enter> Display statistics\n\n");
             sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
                    (struct sockaddr*) &sender_sock, i);
@@ -4046,6 +4066,48 @@ static void readFromMgmtSocket(n2n_edge_t *eee, int *keep_running) {
             eee->last_register_req = n2n_now();
             msg_len += snprintf((char*)(udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
                                 "> peer sync started...\n");
+            sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                   (struct sockaddr*) &sender_sock, i);
+            return;
+        }
+
+        if (recvlen >= 1 && 0 == memcmp(udp_buf, "n", 1)) {
+            msg_len = 0;
+            /* A second observation point (the sn2 query channel) is needed:
+             * without it there is nothing to compare against. */
+            if ( eee->sn_query.family == 0 ) {
+                msg_len += snprintf((char*)(udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                    "> no query channel yet (brother not learned)\n");
+                sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
+                       (struct sockaddr*) &sender_sock, i);
+                return;
+            }
+            /* Reset the whole classification state: the old verdict belongs
+             * to the previous exercise, and re-arming the stranger window
+             * lets a fresh N2NF probe count again. */
+            eee->nat_type = N2N_NAT_UNKNOWN;
+            memset(&eee->nat_seen_sn1, 0, sizeof(n2n_sock_t));
+            memset(&eee->nat_seen_sn2, 0, sizeof(n2n_sock_t));
+            eee->nat_bounce_seen = 0;
+            eee->fc_seen = 0;
+            eee->fc_window = 1;
+            eee->fc_arm_time = n2n_now();
+            eee->nat_probe_time = eee->fc_arm_time;
+            eee->nat_probe_pending = 0;
+            eee->sn_probe_cookie_valid = 0;
+            /* sn1 registration fires at once: nat_type is UNKNOWN again, so
+             * it re-carries the NAT bounce request; the N2N_AFLAGS_NAT_REPROBE
+             * bit asks the SN to re-trigger the brother's N2NF probe even
+             * without a remap (window is armed, so it counts again). The
+             * QUERY_ONLY probe to sn2 runs through the 12s quick window this
+             * command armed, keeping the stranger window open. */
+            if ( eee->supernode.family != 0 )
+            {
+                eee->nat_reprobe = 1; /* one-shot, consumed by send_register_super */
+                send_register_super( eee, &(eee->supernode), 1, 0, NULL );
+            }
+            msg_len += snprintf((char*)(udp_buf + msg_len), (N2N_PKT_BUF_SIZE - msg_len),
+                                "> NAT re-probe started (sn1 bounce + brother N2NF now, sn2 QUERY_ONLY in ~12s)\n");
             sendto(eee->mgmt_sock, udp_buf, msg_len, 0/*flags*/,
                    (struct sockaddr*) &sender_sock, i);
             return;
@@ -5702,8 +5764,12 @@ process_n2n_packet:
                                  * 300s timer happened to fire right at the
                                  * remap, that first-contact packet would slam
                                  * the fresh stranger window shut before the
-                                 * brother's N2NF probes land. */
+                                 * brother's N2NF probes land. fc_arm_time
+                                 * instead schedules one quick probe 12s out
+                                 * (fast symmetric/port-restrict verdict
+                                 * without stealing the brother's window). */
                                 eee->nat_probe_time = now;
+                                eee->fc_arm_time = now;
                             }
 
                             /* First observation for NAT classification: which sn

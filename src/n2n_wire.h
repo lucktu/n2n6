@@ -188,6 +188,10 @@ typedef struct n2n_PACKET n2n_PACKET_t;
                                              (e.g. ask sn2 for sn1's current address):
                                              supernode replies with an ACK but does
                                              NOT register/persist this edge as a peer */
+#define N2N_AFLAGS_NAT_REPROBE    0x4000  /* edge asks the supernode to re-trigger the
+                                             brother's full-cone "N2NF" probe even though
+                                             this registration is not a new/remapped edge
+                                             (mgmt "n" command re-runs NAT detection) */
 
 struct n2n_REGISTER_SUPER
 {
