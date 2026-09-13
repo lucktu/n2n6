@@ -173,7 +173,8 @@ typedef struct n2n_PACKET n2n_PACKET_t;
                                              (different source port, outbound-only)
                                              with the 4-byte magic "N2NB" */
 #define N2N_AFLAGS_NAT_FULL_CONE  0x0100  /* edge reports full-cone NAT
-                                             (reserved: needs a never-contacted 3rd IP) */
+                                             (proved by an "N2NF" probe from the
+                                             brother sn, a never-contacted source) */
 #define N2N_AFLAGS_NAT_RESTRICTED 0x0200  /* edge reports address-restricted cone NAT */
 #define N2N_AFLAGS_NAT_PORT_RESTRICT 0x0400 /* edge reports port-restricted NAT */
 #define N2N_AFLAGS_FORCE_PEER_INFO 0x0008  /* force supernode to push all peer info */

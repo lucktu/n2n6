@@ -226,13 +226,14 @@ typedef char macstr_t[N2N_MACSTR_SIZE];
  * identical -> cone family, any difference -> symmetric. The sn bounce test
  * (helper socket with a different source port) then splits the cone family:
  * the bounce gets through on full-cone/address-restricted NATs and is
- * dropped by port-restricted ones. Full cone cannot be told apart from
- * address-restricted without a never-contacted third IP, so it reports
- * as addr-restr. */
+ * dropped by port-restricted ones. A brother sn plays the never-contacted
+ * third IP: its N2NF probe reaching the edge proves the filter admits any
+ * source -> full cone. Without a brother, full cone cannot be told apart
+ * and reports as addr-restr. */
 #define N2N_NAT_UNKNOWN        0
 #define N2N_NAT_SYMMETRIC      2
-#define N2N_NAT_FULL_CONE      3  /* reserved: needs a never-contacted 3rd IP */
-#define N2N_NAT_RESTRICTED     4  /* addr-restr: helper bounce got through (incl. full cone) */
+#define N2N_NAT_FULL_CONE      3  /* N2NF probe from a never-contacted brother got through */
+#define N2N_NAT_RESTRICTED     4  /* addr-restr: helper bounce got through (incl. full cone w/o brother) */
 #define N2N_NAT_PORT_RESTRICT  5  /* no bounce despite requests */
 
 /* Shared display name for a N2N_NAT_* value ("unknown" when not measured). */

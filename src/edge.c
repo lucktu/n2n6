@@ -2724,8 +2724,9 @@ static void nat_classify( n2n_edge_t * eee )
     }
     else if ( eee->fc_seen )
     {
-        /* No second observation yet, but a bounce from the never-contacted
-         * sn2 crossed the NAT: full cone regardless of the first sn. */
+        /* No second observation yet, but the N2NF probe from the
+         * never-contacted brother sn crossed the NAT: the filter admits
+         * any source -> full cone regardless of the first mapping. */
         new_type = N2N_NAT_FULL_CONE;
     }
     else if ( eee->nat_bounce_seen )
@@ -2757,7 +2758,15 @@ static void nat_classify( n2n_edge_t * eee )
      * SN (which designates us via PEER_INFO RELAY for our own MAC). */
     if ( eee->supernode.family != 0 )
         send_register_super( eee, &(eee->supernode), 1, 0, NULL );
-    if ( eee->sn_query.family != 0 &&
+    /* Pushing this to the sn2 query channel would be the edge's FIRST
+     * contact with sn2 in the current mapping's lifetime — the very event
+     * that closes the full-cone stranger window (fc_window). While the
+     * stranger test is still pending (window open), sn2 must stay
+     * untouched so its N2NF probes still prove full cone; it picks up our
+     * type from the periodic QUERY_ONLY probes / failover registrations
+     * anyway. Only once the window is closed is contacting sn2 harmless. */
+    if ( !eee->fc_window &&
+         eee->sn_query.family != 0 &&
          memcmp( &eee->sn_query, &eee->supernode, sizeof(eee->sn_query) ) != 0 )
         send_register_super( eee, &(eee->sn_query), 1, 0, NULL );
 }
@@ -5689,6 +5698,12 @@ process_n2n_packet:
                                 eee->nat_bounce_seen = 0;
                                 eee->fc_seen = 0;
                                 eee->fc_window = 1;
+                                /* Defer the QUERY_ONLY sn2 probe: if the
+                                 * 300s timer happened to fire right at the
+                                 * remap, that first-contact packet would slam
+                                 * the fresh stranger window shut before the
+                                 * brother's N2NF probes land. */
+                                eee->nat_probe_time = now;
                             }
 
                             /* First observation for NAT classification: which sn
