@@ -6086,29 +6086,6 @@ process_n2n_packet:
                                                    (eee->supernode_alt.family == AF_INET6 ? 1 : 0);
                         }
 
-                        if (first_ok_message_shown == 0) {
-                            const char *caps_str;
-                            if (eee->sn_ipv4_support && eee->sn_ipv6_support)
-                                caps_str = "IPv4+IPv6 (dual-stack)";
-                            else if (eee->sn_ipv6_support)
-                                caps_str = "IPv6 only";
-                            else if (eee->sn_ipv4_support)
-                                caps_str = "IPv4 only";
-                            else
-                                caps_str = "unknown (old supernode)";
-                            traceEvent(TRACE_NORMAL, "Supernode support: %s", caps_str);
-                            char sn_suffix[16] = "";
-                            if (eee->sn_idx > 0)
-                                snprintf(sn_suffix, sizeof(sn_suffix), " %u",
-                                         (unsigned int)(eee->sn_idx + 1));
-                            traceEvent(TRACE_NORMAL, "[OK] edge <<< ======= %s ======= >>> supernode%s",
-                                       sender.family == AF_INET6 ? "IPv6" : "IPv4", sn_suffix);
-                            first_ok_message_shown = 1;
-                        } else {
-                            traceEvent(TRACE_DEBUG, "[OK] edge <<< ======= %s ======= >>> supernode",
-                                       eee->supernode.family == AF_INET6 ? "IPv6" : "IPv4");
-                        }
-
                         /* Surface the backup supernode name from sn_bak_str so -Q
                          * shows it and sn_num >= 2 failover paths exist even when
                          * the user did not pass a second -l. Insert it after sn1
@@ -6173,6 +6150,29 @@ process_n2n_packet:
                                 }
                             }
                             eee->sn_ak_parsed = 1; /* learned (or nothing to learn): stop re-parsing */
+                        }
+
+                        if (first_ok_message_shown == 0) {
+                            const char *caps_str;
+                            if (eee->sn_ipv4_support && eee->sn_ipv6_support)
+                                caps_str = "IPv4+IPv6 (dual-stack)";
+                            else if (eee->sn_ipv6_support)
+                                caps_str = "IPv6 only";
+                            else if (eee->sn_ipv4_support)
+                                caps_str = "IPv4 only";
+                            else
+                                caps_str = "unknown (old supernode)";
+                            traceEvent(TRACE_NORMAL, "Supernode support: %s", caps_str);
+                            char sn_suffix[16] = "";
+                            if (eee->sn_idx > 0)
+                                snprintf(sn_suffix, sizeof(sn_suffix), " %u",
+                                         (unsigned int)(eee->sn_idx + 1));
+                            traceEvent(TRACE_NORMAL, "[OK] edge <<< ======= %s ======= >>> supernode%s",
+                                       sender.family == AF_INET6 ? "IPv6" : "IPv4", sn_suffix);
+                            first_ok_message_shown = 1;
+                        } else {
+                            traceEvent(TRACE_DEBUG, "[OK] edge <<< ======= %s ======= >>> supernode",
+                                       eee->supernode.family == AF_INET6 ? "IPv6" : "IPv4");
                         }
 
                         if (!initial_connection_complete && eee->daemon) {
