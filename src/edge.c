@@ -389,8 +389,11 @@ static int edge_init(n2n_edge_t * eee)
     eee->nat_type = N2N_NAT_UNKNOWN;
     memset(&eee->nat_seen_sn1, 0, sizeof(n2n_sock_t));
     memset(&eee->nat_seen_sn2, 0, sizeof(n2n_sock_t));
+    memset(&eee->nat_seen_sn2_alt, 0, sizeof(n2n_sock_t));
+    memset(&eee->nat_seen_sn_cross, 0, sizeof(n2n_sock_t));
     eee->nat_probe_time = n2n_now(); /* anchor to start-of-run, not t=0: a slow startup (DNS, retries) must not start the one-shot symmetric check before the mapping is live */
     eee->nat_probe_pending = 0;
+    eee->nat_probe_cross = 0;
     eee->nat_bounce_seen = 0;
     eee->fc_seen = 0;
     eee->fc_window = 1;
@@ -2772,9 +2775,11 @@ static int nat_refresh_rebuild( n2n_edge_t * eee )
     memset(&eee->nat_seen_sn1, 0, sizeof(n2n_sock_t));
     memset(&eee->nat_seen_sn2, 0, sizeof(n2n_sock_t));
     memset(&eee->nat_seen_sn2_alt, 0, sizeof(n2n_sock_t));
+    memset(&eee->nat_seen_sn_cross, 0, sizeof(n2n_sock_t));
     memset(&eee->my_public_sock, 0, sizeof(n2n_sock_t));
     eee->nat_probe_time = n2n_now();
     eee->nat_probe_pending = 0;
+    eee->nat_probe_cross = 0;
     eee->nat_bounce_seen = 0;
     eee->fc_seen = 0;
     eee->fc_window = 1;
@@ -2830,48 +2835,43 @@ static void nat_classify( n2n_edge_t * eee )
     pub2 = ( eee->nat_seen_sn2.family == AF_INET &&
              !nat_addr_private( eee->nat_seen_sn2.addr.v4 ) );
 
-    /* Dual-port reuse: the twin probe sent to the current supernode's alt
-     * port (lport+1) echoed the same public port as its main one. The
-     * mapping is then only endpoint-dependent ACROSS IPs and is reused
-     * within an IP (gostun's NAT3-style port-restricted) — such a NAT
-     * punches fine, so an observation disagreement must NOT read as
-     * symmetric NAT4. With a single supernode both observations come from
-     * the same IP, so this is the ONLY evidence that tells NAT3 apart from
-     * NAT4 there. */
+    /* reuse2: the dual-port probe echoed the same public port from two ports
+     * of one IP. Within-IP reuse is the reliable NAT3/NAT4 arbiter — reuse
+     * punches fine (NAT3), churn is endpoint-dependent (NAT4). */
     int reuse2 = ( eee->nat_seen_sn2.family == AF_INET &&
                    eee->nat_seen_sn2_alt.family == AF_INET &&
                    eee->nat_seen_sn2.port == eee->nat_seen_sn2_alt.port );
+
+    /* cross_diff: the same socket got a different public port at sn2, a
+     * distinct IP. A NAT3 changes port per destination by design, so it
+     * never alone implies NAT4 (reuse2 stays the arbiter); but it does veto
+     * NAT1 — a port that changes across destinations is endpoint-dependent,
+     * which no full-cone mapping is, regardless of fc_seen. */
+    int cross_diff = ( eee->nat_seen_sn_cross.family == AF_INET &&
+                       eee->nat_seen_sn2.family == AF_INET &&
+                       eee->nat_seen_sn_cross.port != eee->nat_seen_sn2.port );
 
     if ( pub1 && pub2 && !reuse2 &&
          ( ( eee->nat_seen_sn2_alt.family == AF_INET &&
              eee->nat_seen_sn2.port != eee->nat_seen_sn2_alt.port ) ||
            memcmp( eee->nat_seen_sn1.addr.v4, eee->nat_seen_sn2.addr.v4, IPV4_SIZE ) != 0 ||
            eee->nat_seen_sn1.port != eee->nat_seen_sn2.port ) )
-        /* The two public observations disagree: the mapping is
-         * endpoint-dependent -> symmetric. This is the last word, and it
-         * outranks the N2NF probe on purpose: the probe only shows that the
-         * FILTER is not address-restricted, while the mapping evidence comes
-         * from packets we sent ourselves, out of one socket, in the same
-         * mapping generation. A NAT with endpoint-independent filtering but
-         * endpoint-dependent mapping must not be called full cone: peers
-         * could not reach the address we advertise. The twin disagreement
-         * (same IP, two destination ports) is what lets a single-sn setup -
-         * which has no second observation IP - still catch symmetric NATs:
-         * differing public ports between the lport and lport+1 echoes are
-         * exactly the endpoint-dependent signature. */
+        /* Twin observations disagree: endpoint-dependent -> symmetric. It
+         * outranks the N2NF probe on purpose: endpoint-independent filtering
+         * with endpoint-dependent mapping must not read as full cone. */
         new_type = N2N_NAT_SYMMETRIC;
-    else if ( eee->fc_seen )
-        /* A N2NF probe from the never-contacted brother crossed the NAT, so
-         * the filter admits ANY source -> full cone (mapping agreed above). */
+    else if ( eee->fc_seen && !cross_diff )
+        /* A stranger probe from the never-contacted brother crossed: filter
+         * is open -> full cone. cross_diff vetoes: nothing with a mapping
+         * dependent on the destination IP is a full cone. */
         new_type = N2N_NAT_FULL_CONE;
     else if ( pub1 && pub2 )
     {
         if ( eee->nat_bounce_seen )
             new_type = N2N_NAT_RESTRICTED;
         else
-            /* Cone confirmed and the helper-port bounce never got through
-             * (every registration carried a bounce request, and the sn
-             * bounces before ACKing) -> port-restricted. */
+            /* Cone confirmed but the helper-port bounce never got through
+             * (every registration carried one) -> port-restricted. */
             new_type = N2N_NAT_PORT_RESTRICT;
     }
     else if ( eee->nat_bounce_seen )
@@ -2884,6 +2884,12 @@ static void nat_classify( n2n_edge_t * eee )
     }
     else
         new_type = N2N_NAT_UNKNOWN; /* in-LAN observation proves nothing */
+
+    if ( cross_diff && new_type != N2N_NAT_SYMMETRIC )
+        traceEvent( TRACE_DEBUG,
+                    "NAT cross-IP port differs toward sn2: not full cone (kept %s, "
+                    "full cone vetoed if the brother probe had reached us)",
+                    N2N_NAT_NAME( new_type ) );
 
     /* A partial observation set (e.g. right after the fixed-port restore of
      * an "n" refresh, while only one mapping's echo has returned) derives
@@ -3220,12 +3226,14 @@ static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
             eee->nat_probe_pending = 1;
             random_bytes( NULL, eee->sn_probe_cookie, N2N_COOKIE_SIZE );
             eee->sn_probe_cookie_valid = 1;
+
+            /* Twin probe to the current supernode's main + alt port (lport,
+             * lport+1): the same IP at two destination ports. Equal public
+             * ports prove the mapping is reused WITHIN an IP -> a
+             * per-IP-reuse cone (NAT3) that punches fine. This is the
+             * reliable NAT3/NAT4 arbiter and is kept in every configuration
+             * (a single-sn setup gets the exact same measurement). */
             send_register_super( eee, &(eee->supernode), 0, 2, NULL );
-            /* Twin probe to the supernode's alt port (lport+1): the same IP
-             * at a second destination port, sharing the one cookie. Equal
-             * public ports then prove the mapping is reused per IP
-             * (NAT3-style), the evidence that keeps a per-IP NAT from being
-             * mislabelled NAT4. */
             if ( eee->supernode.family == AF_INET &&
                  eee->supernode.port != 0xFFFF )
             {
@@ -3233,6 +3241,30 @@ static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
                 snq_alt.port = (uint16_t)( eee->supernode.port + 1 );
                 send_register_super( eee, &snq_alt, 0, 2, NULL );
             }
+
+            /* Cross-IP probe: when a second supernode (sn2/sn2+) is
+             * configured on a distinct public IP and the full-cone window has
+             * served (no NAT1 verdict yet), also probe sn2 so we can compare
+             * the public port this ONE socket got toward two different IPs.
+             * This is CONFIRMATORY only: a NAT3 changes its port per
+             * destination IP by design, so cross-IP difference by itself
+             * must never upgrade a device to NAT4 (the within-IP reuse
+             * evidence above is the arbiter). It runs at NAT_STRANGER_SECS
+             * and is skipped once fc_seen (NAT1) is decided, so NAT1
+             * detection is never broken. */
+            int cross_probe = ( eee->sn_num >= 2 &&
+                             eee->sn_query.family == AF_INET &&
+                             eee->supernode.family == AF_INET &&
+                             sock_equal( &(eee->sn_query),
+                                         &(eee->supernode) ) != 0 &&
+                             memcmp( eee->sn_query.addr.v4,
+                                     eee->supernode.addr.v4,
+                                     IPV4_SIZE ) != 0 )
+                           && !eee->fc_seen;
+
+            eee->nat_probe_cross = cross_probe ? 1 : 0;
+            if ( cross_probe )
+                send_register_super( eee, &(eee->sn_query), 0, 2, NULL );
         }
     }
 
@@ -5890,6 +5922,22 @@ process_n2n_packet:
                             nat_classify( eee );
                         }
                     }
+                    else if ( eee->nat_probe_cross &&
+                              eee->sn_query.family != 0 &&
+                              sock_equal( &sender, &(eee->sn_query) ) == 0 )
+                    {
+                        /* Cross-IP probe echo from the second supernode (sn2),
+                         * a distinct public IP. Confirms the port toward a
+                         * second destination; it is never the NAT3/NAT4 arbiter
+                         * (a NAT3 changes its port per destination IP), so it
+                         * is stored separately from the twin observation. */
+                        eee->last_sup = now;
+                        if ( ra.sock.family == AF_INET )
+                        {
+                            eee->nat_seen_sn_cross = ra.sock;
+                            nat_classify( eee ); /* confirmatory: verdict unchanged, may log */
+                        }
+                    }
                     else if ( eee->sn1_probe_addr.family != 0 &&
                               sock_equal( &sender, &eee->sn1_probe_addr ) == 0 )
                     {
@@ -5916,12 +5964,14 @@ process_n2n_packet:
                                     "sn1 back online - switching back to sn1");
                     }
 
-                    /* Spend the one-shot symmetric check only once BOTH twin
-                     * echoes are in: they share one cookie and can arrive in
-                     * either order, and the alt echo is exactly what keeps a
+                    /* Spend the one-shot symmetric check only once BOTH twin echoes are
+                     * in: they share one cookie and can arrive in either
+                     * order, and the alt echo is exactly what keeps a
                      * per-IP-reuse NAT from being frozen as symmetric. An
                      * alt-less SN answers only the main probe; the Phase 2.5
-                     * retry timeout then freezes the verdict as before. */
+                     * retry timeout then freezes the verdict as before. The
+                     * cross-IP echo (sn2) is confirmatory and never gates the
+                     * freeze. */
                     if ( was_sym_check &&
                          eee->nat_seen_sn2.family == AF_INET &&
                          eee->nat_seen_sn2_alt.family == AF_INET )
@@ -6237,7 +6287,9 @@ process_n2n_packet:
                                     memset(&eee->nat_seen_sn1, 0, sizeof(n2n_sock_t));
                                     memset(&eee->nat_seen_sn2, 0, sizeof(n2n_sock_t));
                                     memset(&eee->nat_seen_sn2_alt, 0, sizeof(n2n_sock_t));
+                                    memset(&eee->nat_seen_sn_cross, 0, sizeof(n2n_sock_t));
                                     eee->nat_bounce_seen = 0;
+                                    eee->nat_probe_cross = 0;
                                     eee->fc_seen = 0;
                                     eee->fc_window = 1;
                                     eee->nat_sym_tries = 0;
@@ -8050,7 +8102,9 @@ static int run_loop(n2n_edge_t * eee )
                     memset(&eee->nat_seen_sn1, 0, sizeof(n2n_sock_t));
                     memset(&eee->nat_seen_sn2, 0, sizeof(n2n_sock_t));
                     memset(&eee->nat_seen_sn2_alt, 0, sizeof(n2n_sock_t));
+                    memset(&eee->nat_seen_sn_cross, 0, sizeof(n2n_sock_t));
                     eee->nat_bounce_seen = 0;
+                    eee->nat_probe_cross = 0;
                     eee->nat_final = 1;
                     eee->nat_probe_pending = 0;
                     if ( eee->local_port != 0 )
