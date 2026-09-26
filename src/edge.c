@@ -3684,6 +3684,20 @@ static int send_PACKET( n2n_edge_t * eee,
             if (do_query)
                 p->last_query_sent = now;
         }
+
+        /* On-demand P2P punch: we are actually sending a unicast packet to
+         * this peer, so THIS is the moment to open a direct path (the startup
+         * PEER_INFO dump no longer punches anyone). try_send_register starts
+         * a hole-punch toward the peer unless one is already running or has
+         * failed, so repeated packets do not hammer it. The packet itself is
+         * already being relayed above, so nothing is dropped while the punch
+         * is in flight. Called with PEERS_LOCK held, matching the existing
+         * convention in handle_PACKET / the PEER_INFO handler. */
+        if (p && p->sock.family == AF_INET && eee->udp_sock != -1)
+            try_send_register(eee, 1, dstMac, &p->sock);
+        else if (p && p->sock6.family == AF_INET6 && eee->udp_sock6 != -1)
+            try_send_register(eee, 1, dstMac, &p->sock6);
+
         PEERS_UNLOCK(eee);
 
         if (do_query && p) {
@@ -5795,25 +5809,19 @@ process_n2n_packet:
             pending->psp_logged = 0;
             pending->p2p_logged = 0;
 
-            if (pending->sock6.family == AF_INET6 && eee->udp_sock6 != -1 &&
-                eee->sn_ipv6_support) {
-                /* Dual-stack supernode: sock6 was learned via real IPv6
-                 * registration. Keep the original behaviour exactly — try
-                 * the IPv6 address directly. */
+            /* This PEER_INFO carries the PUNCH flag, which the supernode sets
+             * only in its QUERY_PEER handler — i.e. for exactly the peer that
+             * queried us (communication demand). Startup dumps, NAT-change
+             * pushes and relay advertisements never set PUNCH, so starting the
+             * hole-punch right here targets that one peer only and cannot fan
+             * out to the whole community. Opening the hole immediately beats
+             * waiting for our own outbound packet (send_PACKET) or the first
+             * relayed frame (handle_PACKET). */
+            if (pending->sock.family == AF_INET && eee->udp_sock != -1)
+                try_send_register(eee, 1, pi.mac, &pending->sock);
+            else if (pending->sock6.family == AF_INET6 && eee->udp_sock6 != -1)
                 try_send_register(eee, 1, pi.mac, &pending->sock6);
-            } else if (pending->sock6.family == AF_INET6 && eee->udp_sock6 != -1) {
-                /* IPv4-only supernode: sock6 is an edge-reported address
-                 * (extra way to obtain an IPv6 address). It must NOT change
-                 * the LAN / IPv4 direct flow — run the exact same LAN/IPv4
-                 * logic, using the reported IPv6 only as an ADDITIONAL
-                 * parallel candidate. */
-                try_peer_lan_ipv4(eee, pi.aflags, &pi.sockets[0], &pi.sockets[1],
-                                  pending, &pending->sock6);
-            } else {
-                /* No IPv6 candidate: unchanged LAN / IPv4 direct flow. */
-                try_peer_lan_ipv4(eee, pi.aflags, &pi.sockets[0], &pi.sockets[1],
-                                  pending, NULL);
-            }
+            (void)try_peer_lan_ipv4; /* keep referenced; LAN-first variant stays unused, PUNCH path mirrors send_PACKET's plain REGISTER punch */
 
             PEERS_UNLOCK(eee);
         }
