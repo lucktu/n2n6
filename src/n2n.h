@@ -287,6 +287,7 @@ struct peer_info {
     time_t              last_query_sent;   /* time last query_peer was sent, for rate-limiting */
     time_t              last_punch_probe;  /* time last PROBE was sent during hole-punch */
     uint8_t             punch_retry_count; /* number of punch retries, remove after max */
+    uint8_t             punch_cycle;       /* current PROBE+REGISTER round (0..PUNCH_CYCLES) in the punch loop */
     uint8_t             register_retry_count; /* REGISTER retries after PROBE_ACK, max 3 */
     time_t              last_register_sent;   /* time last REGISTER was sent after PROBE_ACK */
     time_t              direct_seen;       /* time of last direct P2P communication with this peer; 0=never */
