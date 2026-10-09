@@ -861,6 +861,9 @@ ssize_t sendto_sock( SOCKET fd, const void * buf, size_t len, const n2n_sock_t *
     ssize_t sent;
     socklen_t addr_len;
 
+    if( dest->family != AF_INET && dest->family != AF_INET6 )
+        return -1;
+
     fill_sockaddr( (struct sockaddr*) &peer_addr, sizeof(peer_addr), dest );
     addr_len = (dest->family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
 

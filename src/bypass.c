@@ -332,6 +332,8 @@ static int bypass_sendto_nb(bypass_context_t *ctx, const uint8_t *buf, size_t le
                   ? eee->udp_sock6 : eee->udp_sock;
     if (sock == -1) return -1;
 
+    if (dst->family != AF_INET && dst->family != AF_INET6) return -1;
+
     struct sockaddr_in6 peer_addr;
     fill_sockaddr((struct sockaddr *)&peer_addr, sizeof(peer_addr), dst);
     socklen_t addr_len = (dst->family == AF_INET6)
