@@ -276,35 +276,20 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
 #define ROL16(X) ROL(X,16)
 
 
-/* CC20_PERMUTE_ROWS:  B←[0,3,2,1], C←[1,0,3,2], D←[2,1,0,3] */
-static inline uint32x4_t neon_shuffle_0_3_2_1 (uint32x4_t v) {
-    uint32_t tmp = vgetq_lane_u32(v, 1);
-    v = vsetq_lane_u32(vgetq_lane_u32(v, 3), v, 1);
-    v = vsetq_lane_u32(tmp, v, 3);
-    return v;
-}
-
-static inline uint32x4_t neon_shuffle_1_0_3_2 (uint32x4_t v) {
-    return vcombine_u32(vrev64_u32(vget_low_u32(v)),
-                        vrev64_u32(vget_high_u32(v)));
-}
-
-static inline uint32x4_t neon_shuffle_2_1_0_3 (uint32x4_t v) {
-    uint32_t tmp = vgetq_lane_u32(v, 0);
-    v = vsetq_lane_u32(vgetq_lane_u32(v, 2), v, 0);
-    v = vsetq_lane_u32(tmp, v, 2);
-    return v;
-}
+/* Lane rotates, matching the SSE2 _MM_SHUFFLE(0,3,2,1)/(1,0,3,2)/(2,1,0,3). */
+static inline uint32x4_t neon_shuffle_0_3_2_1 (uint32x4_t v) { return vextq_u32(v, v, 1); }
+static inline uint32x4_t neon_shuffle_1_0_3_2 (uint32x4_t v) { return vextq_u32(v, v, 2); }
+static inline uint32x4_t neon_shuffle_2_1_0_3 (uint32x4_t v) { return vextq_u32(v, v, 3); }
 
 #define CC20_PERMUTE_ROWS(A,B,C,D)                     \
-    B = neon_shuffle_2_1_0_3(B);                       \
-    C = neon_shuffle_1_0_3_2(C);                       \
-    D = neon_shuffle_0_3_2_1(D)
-
-#define CC20_PERMUTE_ROWS_INV(A,B,C,D)                 \
     B = neon_shuffle_0_3_2_1(B);                       \
     C = neon_shuffle_1_0_3_2(C);                       \
     D = neon_shuffle_2_1_0_3(D)
+
+#define CC20_PERMUTE_ROWS_INV(A,B,C,D)                 \
+    B = neon_shuffle_2_1_0_3(B);                       \
+    C = neon_shuffle_1_0_3_2(C);                       \
+    D = neon_shuffle_0_3_2_1(D)
 
 #define CC20_ODD_ROUND(A,B,C,D)            \
     /* odd round */                        \
@@ -419,9 +404,9 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
         k0 = ADD(k0, a); k1 = ADD(k1, b); k2 = ADD(k2, c); k3 = ADD(k3, d);
 
         vst1q_u32((uint32_t*)&(ctx->keystream32[0]), k0);
-        vst1q_u32((uint32_t*)&(ctx->keystream32[4]), k1);
-        vst1q_u32((uint32_t*)&(ctx->keystream32[8]), k2);
-        vst1q_u32((uint32_t*)&(ctx->keystream32[12]), k3);
+        vst1q_u32((uint32_t*)&(ctx->keystream32[1]), k1);
+        vst1q_u32((uint32_t*)&(ctx->keystream32[2]), k2);
+        vst1q_u32((uint32_t*)&(ctx->keystream32[3]), k3);
 
         /* keep in mind that out and in got increased inside the last loop
          * and point to current position now */
