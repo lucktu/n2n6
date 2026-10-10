@@ -348,7 +348,7 @@ struct mac_ip_entry {
 #define COMM_STATS_MINUTES   1440   /* 24h in 1-minute buckets */
 #define COMM_STATS_DAYS      30     /* 30-day rolling window */
 #define COMM_STATS_SECONDS   5      /* instant rate averaging window */
-#define RATE_LIMIT_FACTOR    1.0    /* actual rate = limit x this factor */
+#define RATE_LIMIT_FACTOR_PCT 100  /* 100 = 1.0x, 120 = 1.2x (integer: no soft-float) */
 #define RATE_DEBT_SECONDS    10     /* overdraft allowance before queueing */
 #define SHAPER_SLOTS         8      /* queued packets per community (~16KB) */
 
@@ -552,7 +552,7 @@ static int64_t sn_monotonic_ms(void)
  * queueing; larger caps only enlarge the instant passthrough after idle. */
 static uint64_t token_bucket_max(struct community_stats *s)
 {
-    uint64_t max_tokens = (uint64_t)(s->rate_limit_bps * RATE_LIMIT_FACTOR);
+    uint64_t max_tokens = s->rate_limit_bps * RATE_LIMIT_FACTOR_PCT / 100;
     uint64_t min_bucket = 4096; /* accommodate one typical MAX-sized n2n packet */
     if (max_tokens < min_bucket) max_tokens = min_bucket;
     return max_tokens;
@@ -571,7 +571,7 @@ static void token_refill(struct community_stats *s, uint64_t max_tokens)
     int64_t elapsed = now - s->last_token_refill_ms;
     if (elapsed <= 0) return;
     s->last_token_refill_ms = now;
-    s->tokens += (int64_t)((double)elapsed * s->rate_limit_bps * RATE_LIMIT_FACTOR / 1000.0);
+    s->tokens += (int64_t)((uint64_t)elapsed * s->rate_limit_bps * RATE_LIMIT_FACTOR_PCT / 100000);
     if (s->tokens > (int64_t)max_tokens) s->tokens = (int64_t)max_tokens;
 }
 
@@ -789,13 +789,15 @@ static void parse_rate_limit_config(const char *datpath,
         /* Trailing access action: x = deny, y = allow (default) */
         const char *act = NULL;
         if (ntok >= 2 && is_access_action(tok[ntok - 1])) { act = tok[ntok - 1]; ntok--; }
-        double max_gb = 0, rate_kbps = 0;
+        /* Integer-only parsing: atof and double->uint64 conversion are unreliable
+         * on this embedded/soft-float target and produced UINT64_MAX for any input. */
+        unsigned long max_gb = 0, rate_kbps = 0;
         int bc = 64;
         if (ntok == 4) {
             bc = atoi(tok[3]);
-            max_gb = atof(tok[1]); rate_kbps = atof(tok[2]);
+            max_gb = strtoul(tok[1], NULL, 10); rate_kbps = strtoul(tok[2], NULL, 10);
         } else if (ntok == 3) {
-            max_gb = atof(tok[1]); rate_kbps = atof(tok[2]);
+            max_gb = strtoul(tok[1], NULL, 10); rate_kbps = strtoul(tok[2], NULL, 10);
         } else if (ntok >= 2) {
             continue; /* unsupported column count, ignore like before */
         }
@@ -804,8 +806,8 @@ static void parse_rate_limit_config(const char *datpath,
         struct rate_limit_rule *r = (struct rate_limit_rule*)calloc(1, sizeof(*r));
         if (!r) continue;
         strncpy((char*)r->community_name, tok[0], sizeof(n2n_community_t) - 1);
-        r->max_24h_bytes  = (uint64_t)(max_gb * 1024.0 * 1024.0 * 1024.0);
-        r->rate_limit_bps = (uint64_t)(rate_kbps * 1024);
+        r->max_24h_bytes  = (uint64_t)max_gb * 1024ULL * 1024ULL * 1024ULL;
+        r->rate_limit_bps = (uint64_t)rate_kbps * 1024ULL;
         r->bc_gate = bc;
         if (r->bc_gate <= 0)
             r->bc_gate = INT_MAX; /* 0 = everyone */
