@@ -4615,6 +4615,30 @@ static void restart_punch_for_peer( n2n_edge_t * eee,
     }
 }
 
+/* Send a gratuitous ARP probe to a peer's assigned IP (gaming mode). */
+static void send_gaming_arp_probe (n2n_edge_t *eee, uint32_t assigned_ip)
+{
+    uint8_t probe[42];
+    uint32_t target_ip = htonl(assigned_ip);
+
+    memset(probe, 0, sizeof(probe));
+    memset(probe, 0xFF, 6);
+    memcpy(probe + 6, eee->device.mac_addr, 6);
+    probe[12] = 0x08; probe[13] = 0x06;
+    probe[14] = 0x00; probe[15] = 0x01;
+    probe[16] = 0x08; probe[17] = 0x00;
+    probe[18] = 6;    probe[19] = 4;
+    probe[20] = 0x00; probe[21] = 0x01;
+    memcpy(probe + 22, eee->device.mac_addr, 6);
+    memcpy(probe + 28, &eee->device.ip_addr, 4);
+    memset(probe + 32, 0, 6);
+    memcpy(probe + 38, &target_ip, 4);
+    send_packet2net(eee, probe, sizeof(probe));
+    traceEvent(TRACE_INFO, "Gaming: ARP probe sent to %u.%u.%u.%u",
+               (assigned_ip>>24)&0xFF, (assigned_ip>>16)&0xFF,
+               (assigned_ip>>8)&0xFF, assigned_ip&0xFF);
+}
+
 /** Read a datagram from the main UDP socket to the internet.
  *  @return 1 if a packet was read (caller should try to read more),
  *          0 if no more data is available (queue drained). */
@@ -5203,9 +5227,7 @@ process_n2n_packet:
                         PEERS_UNLOCK(eee);
                         return 1;
                     }
-                    /* Flag a change only when the SAME family already stored differs;
-                     * we store one family, so the peer's other family being reported
-                     * back must not look like a change (it would demote known→pending in a loop). */
+                    /* Only a same-family address difference counts as a change. */
                     if (pi.sockets[0].family == AF_INET) {
                         if (known->sock.family == AF_INET &&
                             sock_equal(&known->sock, &pi.sockets[0]) != 0) {
@@ -5236,8 +5258,7 @@ process_n2n_packet:
                             uint8_t nt = N2N_NAT_FROM_AFLAGS(pi.aflags);
                             if (nt) known->nat_type = nt; /* 0 = sn did not report */
                         }
-                        /* Do NOT update last_seen here — PEER_INFO is SN metadata,
-                         * not peer traffic; it would mask relay failures. */
+                        /* Do not refresh last_seen: PEER_INFO is SN metadata, not peer traffic. */
                         PEERS_UNLOCK(eee);
                         return 1;
                     }
@@ -5293,31 +5314,13 @@ process_n2n_packet:
                         uint8_t nt = N2N_NAT_FROM_AFLAGS(pi.aflags);
                         if (nt) pending->nat_type = nt;
                     }
-                    /* SN metadata is not peer communication; refreshing last_seen here would false-arm the punch gate. */
+                    /* Do not refresh last_seen: SN metadata is not peer traffic. */
                     if (addr_changed && was_communicating)
                         restart_punch_for_peer(eee, pending, pi.aflags,
                                                &pi.sockets[0], &pi.sockets[1]);
                     PEERS_UNLOCK(eee);
-                    if (eee->enable_gaming_mode && pi.assigned_ip != 0) {
-                        uint8_t probe[42];
-                        memset(probe, 0, sizeof(probe));
-                        memset(probe, 0xFF, 6);
-                        memcpy(probe + 6, eee->device.mac_addr, 6);
-                        probe[12] = 0x08; probe[13] = 0x06;
-                        probe[14] = 0x00; probe[15] = 0x01;
-                        probe[16] = 0x08; probe[17] = 0x00;
-                        probe[18] = 6;    probe[19] = 4;
-                        probe[20] = 0x00; probe[21] = 0x01;
-                        memcpy(probe + 22, eee->device.mac_addr, 6);
-                        memcpy(probe + 28, &eee->device.ip_addr, 4);
-                        memset(probe + 32, 0, 6);
-                        uint32_t target_ip = htonl(pi.assigned_ip);
-                        memcpy(probe + 38, &target_ip, 4);
-                        send_packet2net(eee, probe, sizeof(probe));
-                        traceEvent(TRACE_INFO, "Gaming: ARP probe sent to %u.%u.%u.%u",
-                                   (pi.assigned_ip>>24)&0xFF, (pi.assigned_ip>>16)&0xFF,
-                                   (pi.assigned_ip>>8)&0xFF, pi.assigned_ip&0xFF);
-                    }
+                    if (eee->enable_gaming_mode && pi.assigned_ip != 0)
+                        send_gaming_arp_probe(eee, pi.assigned_ip);
                     return 1;
                 }
                 pending = calloc(1, sizeof(struct peer_info));
@@ -5338,37 +5341,16 @@ process_n2n_packet:
                 pending->assigned_ip = pi.assigned_ip;
                 pending->nat_type = N2N_NAT_FROM_AFLAGS(pi.aflags);
                 peer_list_add(&eee->pending_peers, pending);
-                /* Backdate last_seen outside PUNCH_ACTIVE_WINDOW: PEER_INFO is SN
-                 * metadata, and 0 would trip the purge (last_seen < now-1800). */
+                /* Backdate last_seen: PEER_INFO is SN metadata and must not trip the purge. */
                 pending->last_seen = n2n_now() - PUNCH_ACTIVE_WINDOW - 1;
                 PEERS_UNLOCK(eee);
-                if (eee->enable_gaming_mode && pi.assigned_ip != 0) {
-                    uint8_t probe[42];
-                    memset(probe, 0, sizeof(probe));
-                    memset(probe, 0xFF, 6);
-                    memcpy(probe + 6, eee->device.mac_addr, 6);
-                    probe[12] = 0x08; probe[13] = 0x06;
-                    probe[14] = 0x00; probe[15] = 0x01;
-                    probe[16] = 0x08; probe[17] = 0x00;
-                    probe[18] = 6;    probe[19] = 4;
-                    probe[20] = 0x00; probe[21] = 0x01;
-                    memcpy(probe + 22, eee->device.mac_addr, 6);
-                    memcpy(probe + 28, &eee->device.ip_addr, 4);
-                    memset(probe + 32, 0, 6);
-                    uint32_t target_ip = htonl(pi.assigned_ip);
-                    memcpy(probe + 38, &target_ip, 4);
-                    send_packet2net(eee, probe, sizeof(probe));
-                    traceEvent(TRACE_INFO, "Gaming: ARP probe sent to %u.%u.%u.%u",
-                              (pi.assigned_ip>>24)&0xFF, (pi.assigned_ip>>16)&0xFF,
-                              (pi.assigned_ip>>8)&0xFF, pi.assigned_ip&0xFF);
-                }
+                if (eee->enable_gaming_mode && pi.assigned_ip != 0)
+                    send_gaming_arp_probe(eee, pi.assigned_ip);
                 return 1;
             }
 
             if (known) {
-                /* Keep a live direct link off the punch handover: demoting it here
-                 * would flip the peer between known and pending and restart punching
-                 * forever, oscillating between IPv6 and IPv4 promotion. */
+                /* Skip punch handover for a live direct peer. */
                 if (known->direct_seen != 0 &&
                     (n2n_now() - known->direct_seen) < PUNCH_DIRECT_ALIVE_SECS) {
                     PEERS_UNLOCK(eee);

@@ -276,7 +276,7 @@ int cc20_crypt (unsigned char *out, const unsigned char *in, size_t in_len,
 #define ROL16(X) ROL(X,16)
 
 
-/* Lane rotates, matching the SSE2 _MM_SHUFFLE(0,3,2,1)/(1,0,3,2)/(2,1,0,3). */
+/* Lane rotates matching SSE2 _MM_SHUFFLE. */
 static inline uint32x4_t neon_shuffle_0_3_2_1 (uint32x4_t v) { return vextq_u32(v, v, 1); }
 static inline uint32x4_t neon_shuffle_1_0_3_2 (uint32x4_t v) { return vextq_u32(v, v, 2); }
 static inline uint32x4_t neon_shuffle_2_1_0_3 (uint32x4_t v) { return vextq_u32(v, v, 3); }

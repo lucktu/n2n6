@@ -276,7 +276,7 @@ struct peer_info {
     time_t              punch_round_time;  /* round anchor for the 2s punch cadence */
     time_t              direct_seen;       /* time of last direct P2P communication with this peer; 0=never */
     time_t              p2p_est_time;      /* time P2P was established (set_peer_operational); for transition grace */
-    uint8_t             last_p2p_log_mac[N2N_MAC_SIZE]; /* per-peer log dedup so peers don't evict each other's slot */
+    uint8_t             last_p2p_log_mac[N2N_MAC_SIZE]; /* per-peer P2P log dedup key */
     n2n_sock_t          last_p2p_log_addr;
     n2n_sock_t          temp_local_sock;   /* dynamically selected best local IP for this peer */
     uint8_t             temp_local_sock_valid; /* 1 if temp_local_sock is valid */
