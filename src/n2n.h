@@ -276,6 +276,8 @@ struct peer_info {
     time_t              punch_round_time;  /* round anchor for the 2s punch cadence */
     time_t              direct_seen;       /* time of last direct P2P communication with this peer; 0=never */
     time_t              p2p_est_time;      /* time P2P was established (set_peer_operational); for transition grace */
+    uint8_t             last_p2p_log_mac[N2N_MAC_SIZE]; /* per-peer log dedup so peers don't evict each other's slot */
+    n2n_sock_t          last_p2p_log_addr;
     n2n_sock_t          temp_local_sock;   /* dynamically selected best local IP for this peer */
     uint8_t             temp_local_sock_valid; /* 1 if temp_local_sock is valid */
     uint8_t             p2p_is_lan;        /* 1=LAN P2P, set by edge.c at REGISTER_SUPER_ACK */
@@ -634,10 +636,6 @@ struct n2n_edge
     size_t              p2p_rx_bytes;
 
     volatile int        keep_running;
-
-    /* Rate-limiting for P2P/PsP log messages */
-    uint8_t             last_p2p_log_mac[N2N_MAC_SIZE];
-    n2n_sock_t          last_p2p_log_addr;
 
     /* Bypass module */
     bypass_context_t   *bp;

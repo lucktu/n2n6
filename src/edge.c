@@ -2284,15 +2284,14 @@ void set_peer_operational( n2n_edge_t * eee,
         scan->punch_start_time = 0;
         scan->punch_failed = 0;
 
-        if (memcmp(scan->mac_addr, eee->last_p2p_log_mac, N2N_MAC_SIZE) ||
-            memcmp(peer, &eee->last_p2p_log_addr, sizeof(n2n_sock_t))) {
-            /* New P2P connection or address changed — log it */
+        if (memcmp(scan->mac_addr, scan->last_p2p_log_mac, N2N_MAC_SIZE) ||
+            memcmp(peer, &scan->last_p2p_log_addr, sizeof(n2n_sock_t))) {
             char mac_buf[18];
             n2n_sock_str_t sockbuf;
             traceEvent( TRACE_NORMAL, "P2P direct with %s at %s",
                         PEER_ID(mac_buf, scan), sock_to_cstr( sockbuf, peer ) );
-            memcpy(eee->last_p2p_log_mac, scan->mac_addr, N2N_MAC_SIZE);
-            memcpy(&eee->last_p2p_log_addr, peer, sizeof(n2n_sock_t));
+            memcpy(scan->last_p2p_log_mac, scan->mac_addr, N2N_MAC_SIZE);
+            memcpy(&scan->last_p2p_log_addr, peer, sizeof(n2n_sock_t));
         }
 
         /* Send REGISTER back to confirm our new address to the peer */
@@ -5204,16 +5203,18 @@ process_n2n_packet:
                         PEERS_UNLOCK(eee);
                         return 1;
                     }
-                    /* Address change is detected unconditionally: a changed address on a communicating pair restarts the punch immediately. */
+                    /* Flag a change only when the SAME family already stored differs;
+                     * we store one family, so the peer's other family being reported
+                     * back must not look like a change (it would demote known→pending in a loop). */
                     if (pi.sockets[0].family == AF_INET) {
-                        if (known->sock.family != AF_INET ||
+                        if (known->sock.family == AF_INET &&
                             sock_equal(&known->sock, &pi.sockets[0]) != 0) {
                             addr_changed = 1;
                             eee->cached_dst_valid = 0;
                         }
                     }
                     if (!addr_changed && pi.sock6.family == AF_INET6) {
-                        if (known->sock6.family != AF_INET6 ||
+                        if (known->sock6.family == AF_INET6 &&
                             sock_equal(&known->sock6, &pi.sock6) != 0) {
                             addr_changed = 1;
                             eee->cached_dst_valid = 0;
@@ -5365,6 +5366,15 @@ process_n2n_packet:
             }
 
             if (known) {
+                /* Keep a live direct link off the punch handover: demoting it here
+                 * would flip the peer between known and pending and restart punching
+                 * forever, oscillating between IPv6 and IPv4 promotion. */
+                if (known->direct_seen != 0 &&
+                    (n2n_now() - known->direct_seen) < PUNCH_DIRECT_ALIVE_SECS) {
+                    PEERS_UNLOCK(eee);
+                    return 1;
+                }
+
                 struct peer_info *prev = NULL, *scan = eee->known_peers;
                 while (scan && memcmp(scan->mac_addr, pi.mac, N2N_MAC_SIZE) != 0) {
                     prev = scan; scan = scan->next;
