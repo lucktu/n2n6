@@ -207,6 +207,14 @@ typedef struct n2n_PACKET n2n_PACKET_t;
                                              stops the two SNs from ping-ponging
                                              when the reply's source port does not
                                              match the receiver's [-b] port. */
+/* SN<->SN community-access tags: sn2 asks sn1's blacklist; the reply tag
+ * carries the verdict. Never sent by edges. */
+#define N2N_ACCESS_QUERY_TAG      "access_query"
+#define N2N_ACCESS_ALLOW_TAG      "access_allow"
+#define N2N_ACCESS_DENY_TAG       "access_deny"
+#define N2N_IS_ACCESS_TAG(c) ( memcmp((c), N2N_ACCESS_QUERY_TAG, sizeof(N2N_ACCESS_QUERY_TAG) - 1) == 0 || \
+                               memcmp((c), N2N_ACCESS_ALLOW_TAG, sizeof(N2N_ACCESS_ALLOW_TAG) - 1) == 0 || \
+                               memcmp((c), N2N_ACCESS_DENY_TAG,  sizeof(N2N_ACCESS_DENY_TAG)  - 1) == 0 )
 
 struct n2n_REGISTER_SUPER
 {
@@ -238,6 +246,9 @@ struct n2n_REGISTER_SUPER
      * an exact identity match, avoiding ambiguity when several brothers
      * share an IP. Old supernodes and edges ignore trailing bytes. */
     n2n_mac_t           desired_sn1_mac;
+
+    /* community an SN<->SN access query/reply is about (tag-driven) */
+    n2n_community_t     access_comm;
 };
 
 typedef struct n2n_REGISTER_SUPER n2n_REGISTER_SUPER_t;

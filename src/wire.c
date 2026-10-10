@@ -365,6 +365,14 @@ size_t encode_REGISTER_SUPER( uint8_t * base,
         retval += encode_buf( base, idx, reg->version, sizeof(reg->version) );
         retval += encode_buf( base, idx, reg->os_name, sizeof(reg->os_name) );
     }
+    /* access tail: the community in question; replaces the length-decoded
+     * ask_backup tail on these messages. */
+    if ( common && N2N_IS_ACCESS_TAG( common->community ) )
+    {
+        retval += encode_buf( base, idx, reg->access_comm,
+                              sizeof(reg->access_comm) );
+        return retval;
+    }
     /* ask_backup tail (sn1 lookup hints): desired_sn1_sock + desired_sn1_mac.
      * Sent only when the edge actually carries a hint, so normal
      * registrations save 14 bytes on the wire. The decoder is
@@ -434,6 +442,17 @@ size_t decode_REGISTER_SUPER( n2n_REGISTER_SUPER_t * reg,
     {
         retval += decode_buf( reg->version, sizeof(reg->version), base, rem, idx );
         retval += decode_buf( reg->os_name, sizeof(reg->os_name), base, rem, idx );
+    }
+    /* access tail: the community in question, not the ask_backup sock/MAC. */
+    {
+        int is_access = cmn && N2N_IS_ACCESS_TAG( cmn->community );
+        if ( is_access )
+        {
+            if ( *rem >= (ssize_t)sizeof(reg->access_comm) )
+                retval += decode_buf( reg->access_comm, sizeof(reg->access_comm),
+                                      base, rem, idx );
+            return retval;
+        }
     }
     /* desired_sn1_sock — ask_backup request. sn2 matches by IP only
      * (port-agnostic) since sn1 may have changed port. Old edges omit.

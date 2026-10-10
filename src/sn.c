@@ -31,6 +31,11 @@ static int resolve_brother_addr(const char *text, n2n_sock_t *out);
 static void send_brother_reg(struct n2n_sn *sss, time_t now);
 static void send_brother_reg_to(struct n2n_sn *sss, const n2n_sock_t *dst, int is_reply);
 static size_t brother_list_format(struct n2n_sn *sss, time_t now, char *buf, size_t bufsz);
+static int  sn_access_should_block(struct n2n_sn *sss, const n2n_community_t comm, time_t now);
+static void sn_access_handle_query(struct n2n_sn *sss, const n2n_REGISTER_SUPER_t *reg,
+                                   const n2n_sock_t *sender, time_t now);
+static void sn_access_handle_reply(struct n2n_sn *sss, const n2n_REGISTER_SUPER_t *reg,
+                                   const char *tag, time_t now);
 
 /* Resolve our [-b] little-brother address (sn2) with caching.
  * Returns 0 on success, -1 if -b is unconfigured or resolution failed. */
@@ -415,6 +420,15 @@ struct rate_limit_rule {
     int             bc_gate;    /* broadcast member cap while throttled */
     int             deny;       /* 1 = deny registration (black/white list) */
     struct rate_limit_rule *next;
+};
+
+/* Cached sn1 verdict on a community; missing/stale means allow. */
+struct access_cache_entry {
+    n2n_community_t comm;
+    time_t          replied_at;   /* 0 = query sent, no reply yet */
+    time_t          queried_at;   /* when the last query was sent */
+    int             denied;
+    struct access_cache_entry *next;
 };
 
 /* Find or create community stats entry.
@@ -885,6 +899,7 @@ struct n2n_sn
     int                    backup_resolved_valid; /* 1 once resolved successfully */
     time_t                 backup_resolved_time;  /* when the cache was filled */
     time_t                 last_brother_seen;
+    struct access_cache_entry *access_cache; /* sn1 community-access verdict cache */
     n2n_mac_t              device_mac;       /* local NIC MAC used as SN identity in brother_reg */
     /* Deferred full-cone probes: #2/#3 staggered so a re-mapped edge re-arms its stranger window first */
 #define FC_PROBE_MAX 16
@@ -893,6 +908,22 @@ struct n2n_sn
 };
 
 typedef struct n2n_sn n2n_sn_t;
+
+/* Known brother SN? IP-level match (its source port may differ). */
+static int sn_is_brother_ip( struct n2n_sn *sss, const n2n_sock_t *s )
+{
+    uint8_t zero[6] = {0,0,0,0,0,0};
+    for (int j = 0; j < MAX_BROTHER_SNS; j++)
+    {
+        n2n_brother_entry_t *b = &sss->brothers[j];
+        if ( memcmp(b->mac, zero, 6) == 0 ) continue;
+        if ( b->sock.family == AF_INET && s->family == AF_INET &&
+             memcmp(b->sock.addr.v4, s->addr.v4, IPV4_SIZE) == 0 ) return 1;
+        if ( b->sock6.family == AF_INET6 && s->family == AF_INET6 &&
+             memcmp(b->sock6.addr.v6, s->addr.v6, IPV6_SIZE) == 0 ) return 1;
+    }
+    return 0;
+}
 
 /* Fixed identity MAC used when a NIC MAC cannot be read. This is the single
  * source of truth shared by both the edge-facing Advertise and the brother
@@ -4049,6 +4080,21 @@ static int process_udp( n2n_sn_t * sss,
             return 0; /* brother registration does not need an ACK */
         }
 
+        /* SN<->SN community-access exchange (never edge traffic). */
+        if ( N2N_IS_ACCESS_TAG( cmn.community ) )
+        {
+            n2n_sock_t access_sender;
+            sock_from_sender( &access_sender, sender_sock );
+            if ( !sn_is_brother_ip( sss, &access_sender ) )
+                return 0;   /* only a brother may ask/answer */
+            if ( memcmp(cmn.community, N2N_ACCESS_QUERY_TAG,
+                        sizeof(N2N_ACCESS_QUERY_TAG) - 1) == 0 )
+                sn_access_handle_query( sss, &reg, &access_sender, now );
+            else
+                sn_access_handle_reply( sss, &reg, (const char*)cmn.community, now );
+            return 0;
+        }
+
         /* Count only real edge registrations; brother heartbeats above
          * return before this point so they never pollute last_reg/reg_sup. */
         sss->stats.last_reg_super=now;
@@ -4058,6 +4104,10 @@ static int process_udp( n2n_sn_t * sss,
          * communities (no reply, so the SN stays hidden). brother_reg
          * above is exempt from this check. */
         if (community_denied(sss->rate_rules, cmn.community))
+            return 0;
+
+        /* Sn1's blacklist governs here too: ask on demand (cached 1 min). */
+        if (sn_access_should_block(sss, cmn.community, now))
             return 0;
 
         /* Edge registration: validate peer_token (if configured). Brother-trusted
@@ -5173,6 +5223,142 @@ static void send_brother_reg_to(n2n_sn_t *sss, const n2n_sock_t *dst, int is_rep
     traceEvent(TRACE_DEBUG, "Sent brother_reg to %s as %02x:%02x:%02x:%02x:%02x:%02x",
                sock_to_cstr(sockbuf, dst),
                id_mac[0], id_mac[1], id_mac[2], id_mac[3], id_mac[4], id_mac[5]);
+}
+
+/* ---- SN<->SN community-access query: ask sn1 on demand, cache the verdict. ---- */
+
+#define SN_ACCESS_TTL      60   /* verdict TTL */
+#define SN_ACCESS_REQUERY   5   /* min seconds between queries */
+
+/* Live big brother (sn1) to ask, or NULL. */
+static const n2n_sock_t * sn_access_brother_sock( struct n2n_sn *sss, time_t now )
+{
+    for (int j = 0; j < MAX_BROTHER_SNS; j++)
+    {
+        n2n_brother_entry_t *b = &sss->brothers[j];
+        if ( b->role != N2N_BROTHER_ROLE_MY_BIG ) continue;
+        if ( b->sock.family == AF_INET && now - b->seen <= 180 ) return &b->sock;
+        if ( b->sock6.family == AF_INET6 && now - b->seen6 <= 180 ) return &b->sock6;
+    }
+    return NULL;
+}
+
+static struct access_cache_entry * access_cache_find( struct n2n_sn *sss,
+                                                      const n2n_community_t comm )
+{
+    for (struct access_cache_entry *e = sss->access_cache; e; e = e->next)
+        if ( memcmp(e->comm, comm, sizeof(n2n_community_t)) == 0 ) return e;
+    return NULL;
+}
+
+static struct access_cache_entry * access_cache_get( struct n2n_sn *sss,
+                                                     const n2n_community_t comm )
+{
+    struct access_cache_entry *e = access_cache_find( sss, comm );
+    if ( !e )
+    {
+        e = (struct access_cache_entry*)calloc(1, sizeof(*e));
+        if ( !e ) return NULL;
+        memcpy(e->comm, comm, sizeof(n2n_community_t));
+        e->next = sss->access_cache;
+        sss->access_cache = e;
+    }
+    return e;
+}
+
+/* Drop stale verdicts. */
+static void sn_access_purge( struct n2n_sn *sss, time_t now )
+{
+    struct access_cache_entry **pp = &sss->access_cache;
+    while (*pp)
+    {
+        struct access_cache_entry *e = *pp;
+        if ( e->replied_at != 0 && now - e->replied_at > SN_ACCESS_TTL )
+        {
+            *pp = e->next;
+            free(e);
+        }
+        else
+            pp = &e->next;
+    }
+}
+
+/* Send an access query or reply; the tag carries a reply's verdict. */
+static void sn_access_send( struct n2n_sn *sss, const n2n_sock_t *dst,
+                            const char *tag, const n2n_community_t comm )
+{
+    n2n_common_t         cmn;
+    n2n_REGISTER_SUPER_t reg;
+    uint8_t              pkt[N2N_SN_PKTBUF_SIZE];
+    size_t               idx = 0;
+    const uint8_t       *id_mac = sn_identity_mac( sss );
+
+    memset(&cmn, 0, sizeof(cmn));
+    memset(&reg, 0, sizeof(reg));
+    cmn.ttl   = N2N_DEFAULT_TTL;
+    cmn.pc    = n2n_register_super;
+    cmn.flags = N2N_FLAGS_SOCKET;
+    memcpy(cmn.community, tag, strlen(tag));
+    memcpy(reg.cookie, id_mac, N2N_COOKIE_SIZE);
+    memcpy(reg.edgeMac, id_mac, sizeof(reg.edgeMac));
+    memcpy(reg.access_comm, comm, sizeof(n2n_community_t));
+
+    encode_REGISTER_SUPER(pkt, &idx, &cmn, &reg);
+    sendto_sock( sss, dst, pkt, idx );
+}
+
+/* 1 = drop (sn1 denies). Queries sn1 when the verdict is unknown. */
+static int sn_access_should_block( struct n2n_sn *sss, const n2n_community_t comm,
+                                   time_t now )
+{
+    sn_access_purge( sss, now );
+
+    const n2n_sock_t *dst = sn_access_brother_sock( sss, now );
+    if ( !dst )
+        return 0;   /* sn1 offline: allow */
+
+    struct access_cache_entry *e = access_cache_find( sss, comm );
+    if ( e && e->replied_at != 0 && now - e->replied_at <= SN_ACCESS_TTL )
+    {
+        if ( e->denied )
+            traceEvent(TRACE_INFO, "Community denied by brother supernode (%.*s)",
+                       (int)sizeof(n2n_community_t), (const char*)comm);
+        return e->denied;
+    }
+
+    /* Unknown: allow now, refresh sn1's verdict in the background. */
+    e = access_cache_get( sss, comm );
+    if ( !e )
+        return 0;
+    if ( e->queried_at == 0 || now - e->queried_at >= SN_ACCESS_REQUERY )
+    {
+        e->queried_at = now;
+        e->replied_at = 0;   /* in flight: allow until sn1 answers */
+        sn_access_send( sss, dst, N2N_ACCESS_QUERY_TAG, comm );
+    }
+    return 0;
+}
+
+static void sn_access_handle_query( struct n2n_sn *sss,
+                                    const n2n_REGISTER_SUPER_t *reg,
+                                    const n2n_sock_t *sender, time_t now )
+{
+    (void)now;
+    sn_access_send( sss, sender,
+                    community_denied( sss->rate_rules, reg->access_comm )
+                        ? N2N_ACCESS_DENY_TAG : N2N_ACCESS_ALLOW_TAG,
+                    reg->access_comm );
+}
+
+static void sn_access_handle_reply( struct n2n_sn *sss,
+                                    const n2n_REGISTER_SUPER_t *reg,
+                                    const char *tag, time_t now )
+{
+    struct access_cache_entry *e = access_cache_get( sss, reg->access_comm );
+    if ( !e ) return;
+    e->denied = ( memcmp(tag, N2N_ACCESS_DENY_TAG,
+                         sizeof(N2N_ACCESS_DENY_TAG) - 1) == 0 ) ? 1 : 0;
+    e->replied_at = now;
 }
 
 /* resolve_brother_addr: parse "host:port" into an n2n_sock_t.
