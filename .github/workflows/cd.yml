@@ -186,13 +186,38 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo timedatectl set-timezone "Asia/Shanghai"
 
-      - name: Download gcc
+      - name: Download musl toolchain
         if: runner.os == 'Linux'
-        uses: lmq8267/dl-musl@main
-        with:
-          target: ${{ matrix.URL }}
-          static: true
-          gccpath: /opt/musl_gcc
+        run: |
+          set -e
+          case "${{ matrix.URL }}" in
+            aarch64-linux-musl)       A=aarch64 ;;
+            x86_64-linux-musl)        A=x86-64 ;;
+            i686-linux-musl)          A=x86-i686 ;;
+            armv7l-linux-musleabihf)  A=armv7-eabihf ;;
+            arm-linux-musleabihf)     A=armv7-eabihf ;;
+            armv7m-linux-musleabi)    A=armv5-eabi ;;
+            arm-linux-musleabi)       A=armv5-eabi ;;
+            mipsel-linux-muslsf)      A=mips32el ;;
+            mips-linux-muslsf)        A=mips32 ;;
+            *) echo "unknown target: ${{ matrix.URL }}"; exit 1 ;;
+          esac
+          ok=""
+          for R in stable-2026.08-1 stable-2025.08-1 stable-2024.08-1; do
+            for E in xz bz2; do
+              U="https://toolchains.bootlin.com/downloads/releases/toolchains/${A}/tarballs/${A}--musl--${R}.tar.${E}"
+              if curl -fsSL --retry 2 --retry-delay 3 "$U" -o "/tmp/tc.tar.${E}"; then ok=1; break 2; fi
+            done
+          done
+          [ -n "$ok" ] || { echo "no musl toolchain for $A"; exit 1; }
+          sudo mkdir -p /opt/musl_gcc
+          sudo tar -xf /tmp/tc.tar.* -C /opt/musl_gcc --strip-components=1
+          CC=$(ls /opt/musl_gcc/bin/*-gcc | head -1)
+          STRIP=$(ls /opt/musl_gcc/bin/*-strip | head -1)
+          echo "/opt/musl_gcc/bin" >> "$GITHUB_PATH"
+          echo "CC=${CC}" >> "$GITHUB_ENV"
+          echo "STRIP=${STRIP}" >> "$GITHUB_ENV"
+          "$CC" --version | head -1
 
       - name: Linux build
         if: runner.os == 'Linux'
